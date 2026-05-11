@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "botsdock-agent-connector"
+version = "0.1.0"
+description = "Provider-neutral connector for BotsDock Agent Workbench"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=16,<17",
+]
+
+[project.optional-dependencies]
+claude = [
+    "claude-agent-sdk",
+]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+botsdock-agent-connector = "agent_connector.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

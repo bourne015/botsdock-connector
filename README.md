@@ -1,0 +1,58 @@
+# BotsDock Agent Connector
+
+Provider-neutral connector for BotsDock Agent Workbench.
+
+The connector runs on the user's machine and connects outbound to Codex Web.
+The user does not choose a provider on the command line. The connector first
+bootstraps against the registered machine, Codex Web returns the machine
+provider, and the connector starts the matching runtime driver.
+
+Supported providers:
+
+- `codex`: local `codex app-server`
+- `claude_code`: official Claude Agent SDK (`claude-agent-sdk`)
+
+## Development
+
+Install the package in editable mode:
+
+```bash
+python3 -m pip install -e .
+```
+
+Install Claude support when needed:
+
+```bash
+python3 -m pip install -e '.[claude]'
+```
+
+Run the generated registration command from the workspace you want the agent to
+use:
+
+```bash
+botsdock-agent-connector --server https://www.botsdock.cn --machine-id mach_xxx --token token_xxx
+```
+
+After the first successful connection, the connector token is saved in
+`.botsdock_agent_connector.json`, so reconnecting can be:
+
+```bash
+botsdock-agent-connector
+```
+
+## Protocol
+
+The first WebSocket message is provider-neutral:
+
+```json
+{"type":"connector.bootstrap"}
+```
+
+Codex Web validates the machine token and returns:
+
+```json
+{"type":"connector.bootstrap","provider":"codex"}
+```
+
+The connector then sends the regular `connector.hello` with provider-specific
+capabilities and starts that provider's runtime.
