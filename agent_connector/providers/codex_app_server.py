@@ -125,7 +125,7 @@ class AppServerProcessClient:
                     "version": "0.1.0",
                 },
                 "capabilities": {
-                    "experimentalApi": False,
+                    "experimentalApi": True,
                     "optOutNotificationMethods": [],
                 },
             },

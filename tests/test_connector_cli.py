@@ -8,6 +8,7 @@ from agent_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkProvider,
     ClaudeAgentSdkRuntimeMissing,
 )
+from agent_connector.providers.codex_app_server import AppServerProcessClient
 
 
 @dataclass
@@ -105,3 +106,27 @@ def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:
 
     assert [event.type for event in events] == ["turn.failed"]
     assert events[0].payload["error"] == "provider_runtime_missing"
+
+
+def test_codex_app_server_initializes_experimental_api_capability() -> None:
+    class FakeAppServer(AppServerProcessClient):
+        def __init__(self) -> None:
+            self.requests = []
+            self.notifications = []
+
+        def request(self, method, params=None):
+            self.requests.append((method, params))
+            return {"ok": True}
+
+        def notification(self, method, params=None) -> None:
+            self.notifications.append((method, params))
+
+    app_server = FakeAppServer()
+
+    result = app_server.initialize()
+
+    assert result == {"ok": True}
+    method, params = app_server.requests[0]
+    assert method == "initialize"
+    assert params["capabilities"]["experimentalApi"] is True
+    assert app_server.notifications == [("initialized", None)]
