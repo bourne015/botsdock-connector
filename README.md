@@ -30,8 +30,11 @@ Run the generated registration command from the workspace you want the agent to
 use:
 
 ```bash
-botsdock-agent-connector --server https://www.botsdock.cn --machine-id mach_xxx --token token_xxx
+botsdock-agent-connector --machine-id mach_xxx --token token_xxx
 ```
+
+`https://www.botsdock.cn` is the default backend. Pass `--server <base_url>`
+only for staging, self-hosted, or local debugging environments.
 
 After the first successful connection, the connector token is saved in
 `.botsdock_agent_connector.json`, so reconnecting can be:
