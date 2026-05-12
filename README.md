@@ -79,6 +79,37 @@ The env file is read only by the local connector process and is never sent to
 BotsDock. You can also point at another file with `BOTSDOCK_AGENT_ENV_FILE` or
 `--env-file`.
 
+## Runtime profiles
+
+同一台物理机器可以注册多个 Claude Code machine，并让它们使用不同的本地
+CLI/env/model 配置。BotsDock 不保存 Claude、Anthropic 或第三方网关的登录
+凭据；这些凭据始终留在用户本机，由 connector 在启动对应 provider runtime
+时注入给 Claude Agent SDK。
+
+默认 profile id 是 `default`。如果需要区分 Claude 官方 CLI 登录、DeepSeek
+网关、公司代理等本地身份，可以在首次注册对应 machine 时指定 profile：
+
+```bash
+botsdock-agent-connector \
+  --machine-id mach_xxx \
+  --token token_xxx \
+  --runtime-profile deepseek \
+  --runtime-profile-name "DeepSeek" \
+  --env-file ~/.botsdock/agent_connector.deepseek.env
+```
+
+注册成功后，profile id/name、env 文件路径、模型覆盖和 CLI 路径会写入本地
+`.botsdock_agent_connector.json`。之后直接运行：
+
+```bash
+botsdock-agent-connector
+```
+
+connector 会在一个进程中并发维护所有 saved machine，并为每条连接加载各自
+的 runtime profile。`connector.hello` 只会上报 profile 的非敏感元数据，例如
+profile id、display name、env key 名称、模型名和 CLI 标签；env 文件内容和
+token 值不会发送到 BotsDock。
+
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude
 Agent SDK session APIs, then falls back to local transcript JSONL files under

@@ -525,6 +525,10 @@ class ClaudeAgentSdkProvider:
         exclude_history_cwds: list[str] | tuple[str, ...] = (),
         model: str | None = None,
         cli_path: str | None = None,
+        runtime_profile_id: str = "default",
+        runtime_profile_name: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+        env_file: str | None = None,
         approval_timeout_seconds: float = 900,
     ) -> None:
         self.cwd = cwd
@@ -536,6 +540,10 @@ class ClaudeAgentSdkProvider:
         }
         self.model = model
         self.cli_path = cli_path
+        self.runtime_profile_id = runtime_profile_id or "default"
+        self.runtime_profile_name = runtime_profile_name
+        self.env_overrides = dict(env_overrides or {})
+        self.env_file = env_file
         self.approval_timeout_seconds = approval_timeout_seconds
         self._sdk: Any | None = None
         self._sdk_types: Any | None = None
@@ -577,9 +585,48 @@ class ClaudeAgentSdkProvider:
         return {
             "type": "thread.sync",
             "provider": self.name,
+            "active_runtime_profile_id": self.active_runtime_profile_id,
             "threads": threads,
             "workspaces": self._workspaces_from_threads(threads),
             "authoritative": bool(threads),
+        }
+
+    @property
+    def active_runtime_profile_id(self) -> str:
+        return self.runtime_profile_id
+
+    def runtime_profiles(self) -> list[JsonDict]:
+        return [self.runtime_profile_report()]
+
+    def runtime_profile_report(self) -> JsonDict:
+        env = self._claude_env_overrides()
+        env_keys = sorted(
+            key
+            for key in env
+            if key != "CLAUDE_AGENT_SDK_CLIENT_APP"
+            and key.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
+        )
+        auth_source = "claude_cli_settings"
+        if self.env_file and self.env_overrides:
+            auth_source = "env_file"
+        elif any(key in env_keys for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")):
+            auth_source = "environment"
+        model = (
+            self.model
+            or self.env_overrides.get("ANTHROPIC_MODEL")
+            or os.environ.get("ANTHROPIC_MODEL")
+        )
+        return {
+            "id": self.runtime_profile_id,
+            "display_name": self.runtime_profile_name
+            or ("Default CLI" if self.runtime_profile_id == "default" else self.runtime_profile_id),
+            "provider": self.name,
+            "runtime": "claude_agent_sdk",
+            "auth_source": auth_source,
+            "env_keys": env_keys,
+            "env_file_configured": bool(self.env_file),
+            "model": model,
+            "cli_label": Path(self.cli_path).name if self.cli_path else "sdk_default",
         }
 
     def read_thread_history(self, request: JsonDict) -> JsonDict:
@@ -1047,6 +1094,7 @@ class ClaudeAgentSdkProvider:
         for key, value in os.environ.items():
             if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_")):
                 env[key] = value
+        env.update(self.env_overrides)
         return env
 
     def _build_permission_handler(

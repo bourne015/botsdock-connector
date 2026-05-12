@@ -34,6 +34,7 @@ from .token_store import (
 JsonDict = dict[str, Any]
 CODEX_AGENT_PROVIDER = "codex"
 CLAUDE_CODE_AGENT_PROVIDER = "claude_code"
+DEFAULT_RUNTIME_PROFILE_ID = "default"
 
 
 @dataclass
@@ -44,6 +45,11 @@ class ConnectionSpec:
     cwd: str
     provider: str | None = None
     default_workspace_cwd: str | None = None
+    runtime_profile_id: str = DEFAULT_RUNTIME_PROFILE_ID
+    runtime_profile_name: str | None = None
+    env_file: str | None = None
+    model: str | None = None
+    claude_bin: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,9 +70,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cwd", default=None, help="optional default workspace root")
     parser.add_argument(
+        "--runtime-profile",
+        default=os.environ.get("BOTSDOCK_AGENT_PROFILE")
+        or os.environ.get("BOTSDOCK_CLAUDE_PROFILE"),
+        help="Local runtime profile id for provider-specific CLI/env settings. Defaults to 'default'.",
+    )
+    parser.add_argument(
+        "--runtime-profile-name",
+        default=os.environ.get("BOTSDOCK_AGENT_PROFILE_NAME")
+        or os.environ.get("BOTSDOCK_CLAUDE_PROFILE_NAME"),
+        help="Optional display name for the local runtime profile.",
+    )
+    parser.add_argument(
         "--env-file",
-        default=default_env_file(),
-        help="Local env file for provider credentials. Defaults to BOTSDOCK_AGENT_ENV_FILE or ~/.botsdock/agent_connector.env when present.",
+        default=os.environ.get("BOTSDOCK_AGENT_ENV_FILE"),
+        help="Local env file for provider credentials. Defaults to a profile-specific ~/.botsdock/agent_connector.<profile>.env or ~/.botsdock/agent_connector.env when present.",
     )
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
@@ -95,21 +113,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def default_env_file() -> str | None:
+def normalize_runtime_profile_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or DEFAULT_RUNTIME_PROFILE_ID
+
+
+def default_env_file(runtime_profile_id: str | None = None) -> str | None:
     configured = os.environ.get("BOTSDOCK_AGENT_ENV_FILE")
     if configured:
         return configured
+    profile_id = normalize_runtime_profile_id(runtime_profile_id)
+    if profile_id != DEFAULT_RUNTIME_PROFILE_ID:
+        profile_path = Path.home() / ".botsdock" / f"agent_connector.{profile_id}.env"
+        if profile_path.exists():
+            return str(profile_path)
     path = Path.home() / ".botsdock" / "agent_connector.env"
     return str(path) if path.exists() else None
 
 
-def load_env_file(path: str | None) -> list[str]:
+def load_env_file(path: str | None) -> dict[str, str]:
     if not path:
-        return []
+        return {}
     env_path = Path(path).expanduser()
     if not env_path.exists():
         raise ConnectorError(f"env file not found: {env_path}")
-    loaded: list[str] = []
+    loaded: dict[str, str] = {}
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -123,14 +151,12 @@ def load_env_file(path: str | None) -> list[str]:
         if not key:
             continue
         value = value.strip().strip('"').strip("'")
-        if key not in os.environ:
-            os.environ[key] = value
-        loaded.append(key)
+        loaded[key] = value
     return loaded
 
 
 def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) -> JsonDict:
-    return {
+    hello: JsonDict = {
         "type": "connector.hello",
         "provider": provider.name,
         "connector_version": connector_version,
@@ -151,6 +177,7 @@ def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) 
         ],
         "provider_runtime": {
             "name": provider.name,
+            "active_runtime_profile_id": provider.active_runtime_profile_id,
             "capabilities": {
                 "can_resume_session": provider.capabilities.can_resume_session,
                 "can_cancel_turn": provider.capabilities.can_cancel_turn,
@@ -160,6 +187,11 @@ def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) 
             },
         },
     }
+    runtime_profiles = provider.runtime_profiles()
+    if runtime_profiles:
+        hello["runtime_profiles"] = runtime_profiles
+        hello["active_runtime_profile_id"] = provider.active_runtime_profile_id
+    return hello
 
 
 def workspace_report(cwd: str) -> JsonDict:
@@ -286,6 +318,7 @@ class ClaudeCodeConnector:
                     "provider": self.provider.name,
                     "runtime": "claude_agent_sdk",
                     "cwd": self.provider.cwd,
+                    "runtime_profile": self.provider.runtime_profile_report(),
                 },
             )
         if msg_type in {
@@ -332,7 +365,21 @@ def reconnect_command(args: argparse.Namespace) -> str:
         parts.extend(["--server", args.server])
     if args.cwd and args.cwd != ".":
         parts.extend(["--cwd", args.cwd])
-    if args.model:
+    runtime_profile_id = normalize_runtime_profile_id(
+        getattr(args, "runtime_profile_id", None) or getattr(args, "runtime_profile", None)
+    )
+    if runtime_profile_id != DEFAULT_RUNTIME_PROFILE_ID:
+        parts.extend(["--runtime-profile", runtime_profile_id])
+    runtime_profile_name = getattr(args, "runtime_profile_name", None)
+    if runtime_profile_name:
+        parts.extend(["--runtime-profile-name", runtime_profile_name])
+    env_file = getattr(args, "env_file", None)
+    if env_file:
+        parts.extend(["--env-file", env_file])
+    claude_bin = getattr(args, "claude_bin", None)
+    if claude_bin:
+        parts.extend(["--claude-bin", claude_bin])
+    if getattr(args, "model", None):
         parts.extend(["--model", args.model])
     return " ".join(shlex.quote(str(part)) for part in parts)
 
@@ -349,17 +396,62 @@ def _connection_args(args: argparse.Namespace, spec: ConnectionSpec) -> argparse
     connection_args.token = spec.token
     connection_args.cwd = spec.cwd
     connection_args.default_workspace_cwd = spec.default_workspace_cwd
+    connection_args.runtime_profile = spec.runtime_profile_id
+    connection_args.runtime_profile_id = spec.runtime_profile_id
+    connection_args.runtime_profile_name = spec.runtime_profile_name
+    connection_args.env_file = spec.env_file
+    connection_args.model = spec.model
+    connection_args.claude_bin = spec.claude_bin
     connection_args.connection_spec = spec
     connection_args.registration_only = registration_only
     return connection_args
 
 
+def _effective_runtime_profile_id(
+    args: argparse.Namespace,
+    saved: str | None = None,
+) -> str:
+    return normalize_runtime_profile_id(
+        getattr(args, "runtime_profile", None)
+        or getattr(args, "runtime_profile_id", None)
+        or saved
+    )
+
+
+def _effective_runtime_profile_name(
+    args: argparse.Namespace,
+    saved: str | None = None,
+) -> str | None:
+    value = getattr(args, "runtime_profile_name", None) or saved
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _effective_env_file(
+    args: argparse.Namespace,
+    *,
+    runtime_profile_id: str,
+    saved: str | None = None,
+) -> str | None:
+    value = getattr(args, "env_file", None) or saved
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default_env_file(runtime_profile_id)
+
+
 def _spec_from_saved(
     connector: SavedConnector,
     *,
+    args: argparse.Namespace,
     cwd: str,
     default_workspace_cwd: str | None,
 ) -> ConnectionSpec:
+    runtime_profile_id = _effective_runtime_profile_id(
+        args,
+        saved=connector.runtime_profile_id,
+    )
     return ConnectionSpec(
         server=connector.server,
         machine_id=connector.machine_id,
@@ -367,6 +459,18 @@ def _spec_from_saved(
         cwd=cwd,
         provider=connector.provider,
         default_workspace_cwd=default_workspace_cwd,
+        runtime_profile_id=runtime_profile_id,
+        runtime_profile_name=_effective_runtime_profile_name(
+            args,
+            saved=connector.runtime_profile_name,
+        ),
+        env_file=_effective_env_file(
+            args,
+            runtime_profile_id=runtime_profile_id,
+            saved=connector.env_file,
+        ),
+        model=getattr(args, "model", None) or connector.model,
+        claude_bin=getattr(args, "claude_bin", None) or connector.claude_bin,
     )
 
 
@@ -378,6 +482,18 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
     if token and not machine_id:
         raise ConnectorError("missing machine-id for registration token connection")
     if machine_id:
+        saved_connector = None
+        if not token:
+            saved_connector = next(
+                (
+                    connector
+                    for connector in load_saved_connectors(server_url=args.server, cwd=cwd)
+                    if connector.machine_id == machine_id
+                ),
+                None,
+            )
+            if saved_connector is not None:
+                token = saved_connector.token
         if not token:
             token = load_connector_token(
                 server_url=args.server,
@@ -386,13 +502,32 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
             )
         if not token:
             raise ConnectorError("missing connector token. Run the web-generated registration command once.")
+        runtime_profile_id = _effective_runtime_profile_id(
+            args,
+            saved=saved_connector.runtime_profile_id if saved_connector is not None else None,
+        )
         return [
             ConnectionSpec(
                 server=args.server.rstrip("/"),
                 machine_id=machine_id,
                 token=token,
                 cwd=cwd,
+                provider=saved_connector.provider if saved_connector is not None else None,
                 default_workspace_cwd=default_workspace_cwd,
+                runtime_profile_id=runtime_profile_id,
+                runtime_profile_name=_effective_runtime_profile_name(
+                    args,
+                    saved=saved_connector.runtime_profile_name if saved_connector is not None else None,
+                ),
+                env_file=_effective_env_file(
+                    args,
+                    runtime_profile_id=runtime_profile_id,
+                    saved=saved_connector.env_file if saved_connector is not None else None,
+                ),
+                model=getattr(args, "model", None)
+                or (saved_connector.model if saved_connector is not None else None),
+                claude_bin=getattr(args, "claude_bin", None)
+                or (saved_connector.claude_bin if saved_connector is not None else None),
             )
         ]
     if token:
@@ -404,6 +539,7 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
     return [
         _spec_from_saved(
             connector,
+            args=args,
             cwd=cwd,
             default_workspace_cwd=default_workspace_cwd,
         )
@@ -423,7 +559,12 @@ async def resolve_connection_args(args: argparse.Namespace) -> tuple[str, str, s
 
 def connection_label(spec: ConnectionSpec) -> str:
     provider = f" provider={spec.provider}" if spec.provider else ""
-    return f"machine={spec.machine_id}{provider}"
+    profile = (
+        f" profile={spec.runtime_profile_id}"
+        if spec.runtime_profile_id != DEFAULT_RUNTIME_PROFILE_ID
+        else ""
+    )
+    return f"machine={spec.machine_id}{provider}{profile}"
 
 
 async def run_connector_once_for_spec(args: argparse.Namespace, spec: ConnectionSpec) -> None:
@@ -578,6 +719,14 @@ async def save_accepted_token(
         machine_id=machine_id,
         token=new_connector_token,
         provider=provider if isinstance(provider, str) else None,
+        runtime_profile={
+            "id": getattr(args, "runtime_profile_id", None)
+            or getattr(args, "runtime_profile", None),
+            "display_name": getattr(args, "runtime_profile_name", None),
+            "env_file": getattr(args, "env_file", None),
+            "model": getattr(args, "model", None),
+            "claude_bin": getattr(args, "claude_bin", None),
+        },
         cwd=connector_cwd,
     )
     print(f"agent connector token saved: {token_path}", file=sys.stderr)
@@ -592,6 +741,12 @@ async def run_claude_provider_session(
     machine_id: str,
 ) -> None:
     outbound: asyncio.Queue[JsonDict] = asyncio.Queue()
+    profile_env = load_env_file(getattr(args, "env_file", None))
+    if profile_env:
+        print(
+            f"agent connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
+            file=sys.stderr,
+        )
     provider = ClaudeAgentSdkProvider(
         cwd=connector_cwd,
         default_cwd=getattr(args, "default_workspace_cwd", None),
@@ -600,6 +755,10 @@ async def run_claude_provider_session(
         else (connector_cwd,),
         model=args.model,
         cli_path=getattr(args, "claude_bin", None),
+        runtime_profile_id=getattr(args, "runtime_profile_id", DEFAULT_RUNTIME_PROFILE_ID),
+        runtime_profile_name=getattr(args, "runtime_profile_name", None),
+        env_overrides=profile_env,
+        env_file=getattr(args, "env_file", None),
         approval_timeout_seconds=args.approval_timeout,
     )
     connector = ClaudeCodeConnector(provider=provider, outbound=outbound)
@@ -804,12 +963,6 @@ async def run_connector(args: argparse.Namespace) -> None:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        loaded_env_keys = load_env_file(args.env_file)
-        if loaded_env_keys:
-            print(
-                f"agent connector loaded env file: {args.env_file} ({len(loaded_env_keys)} key(s))",
-                file=sys.stderr,
-            )
         asyncio.run(run_connector(args))
         return 0
     except KeyboardInterrupt:

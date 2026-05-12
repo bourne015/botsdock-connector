@@ -97,7 +97,7 @@ def test_claude_auth_prompt_text_is_not_mapped_as_assistant_message() -> None:
     assert result[0].payload["error"] == "provider_auth_required"
 
 
-def test_env_file_loads_missing_local_provider_credentials() -> None:
+def test_env_file_parses_local_provider_credentials_without_global_mutation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "connector.env"
         path.write_text(
@@ -110,37 +110,36 @@ def test_env_file_loads_missing_local_provider_credentials() -> None:
             ),
             encoding="utf-8",
         )
-        previous = {
-            key: os.environ.get(key)
-            for key in (
-                "BOTS_TEST_AGENT_CONNECTOR_ENV",
-                "BOTS_TEST_AGENT_CONNECTOR_EXPORTED",
-            )
+        os.environ.pop("BOTS_TEST_AGENT_CONNECTOR_ENV", None)
+        os.environ.pop("BOTS_TEST_AGENT_CONNECTOR_EXPORTED", None)
+
+        loaded = load_env_file(str(path))
+
+        assert loaded == {
+            "BOTS_TEST_AGENT_CONNECTOR_ENV": "from_file",
+            "BOTS_TEST_AGENT_CONNECTOR_EXPORTED": "quoted",
         }
-        for key in previous:
-            os.environ.pop(key, None)
-        try:
-            loaded = load_env_file(str(path))
-            assert loaded == [
-                "BOTS_TEST_AGENT_CONNECTOR_ENV",
-                "BOTS_TEST_AGENT_CONNECTOR_EXPORTED",
-            ]
-            assert os.environ["BOTS_TEST_AGENT_CONNECTOR_ENV"] == "from_file"
-            assert os.environ["BOTS_TEST_AGENT_CONNECTOR_EXPORTED"] == "quoted"
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        assert "BOTS_TEST_AGENT_CONNECTOR_ENV" not in os.environ
+        assert "BOTS_TEST_AGENT_CONNECTOR_EXPORTED" not in os.environ
 
 
 def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
-    provider = ClaudeAgentSdkProvider(cwd=".")
+    provider = ClaudeAgentSdkProvider(
+        cwd=".",
+        runtime_profile_id="deepseek",
+        runtime_profile_name="DeepSeek",
+        env_overrides={"ANTHROPIC_BASE_URL": "https://example.test", "ANTHROPIC_AUTH_TOKEN": "secret"},
+        env_file="/tmp/profile.env",
+    )
     hello = provider_hello(provider, connector_version="test")
     assert hello["type"] == "connector.hello"
     assert hello["provider"] == "claude_code"
     assert "app_server.turn_start" in hello["capabilities"]
+    assert hello["active_runtime_profile_id"] == "deepseek"
+    assert hello["runtime_profiles"][0]["display_name"] == "DeepSeek"
+    assert hello["runtime_profiles"][0]["auth_source"] == "env_file"
+    assert "ANTHROPIC_AUTH_TOKEN" in hello["runtime_profiles"][0]["env_keys"]
+    assert "secret" not in json.dumps(hello)
 
     envelope = provider._envelope(
         "assistant.message",
@@ -181,6 +180,13 @@ def test_saved_connectors_can_be_loaded_together() -> None:
             machine_id="mach_claude",
             token="token_claude",
             provider="claude_code",
+            runtime_profile={
+                "id": "deepseek",
+                "display_name": "DeepSeek",
+                "env_file": "/tmp/deepseek.env",
+                "model": "deepseek-chat",
+                "claude_bin": "/usr/local/bin/claude",
+            },
             cwd=tmp,
         )
 
@@ -190,6 +196,12 @@ def test_saved_connectors_can_be_loaded_together() -> None:
         ("mach_claude", "token_claude", "claude_code"),
         ("mach_codex", "token_codex", "codex"),
     ]
+    claude = next(item for item in connectors if item.machine_id == "mach_claude")
+    assert claude.runtime_profile_id == "deepseek"
+    assert claude.runtime_profile_name == "DeepSeek"
+    assert claude.env_file == "/tmp/deepseek.env"
+    assert claude.model == "deepseek-chat"
+    assert claude.claude_bin == "/usr/local/bin/claude"
 
 
 def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
@@ -198,6 +210,11 @@ def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
         machine_id = None
         token = None
         cwd = ""
+        runtime_profile = None
+        runtime_profile_name = None
+        env_file = None
+        model = None
+        claude_bin = None
 
     with tempfile.TemporaryDirectory() as tmp:
         Args.cwd = tmp
@@ -213,6 +230,7 @@ def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
             machine_id="mach_claude",
             token="token_claude",
             provider="claude_code",
+            runtime_profile={"id": "deepseek", "env_file": "/tmp/deepseek.env"},
             cwd=tmp,
         )
 
@@ -222,6 +240,48 @@ def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
         ("mach_claude", "claude_code"),
         ("mach_codex", "codex"),
     ]
+    claude = next(item for item in specs if item.machine_id == "mach_claude")
+    assert claude.runtime_profile_id == "deepseek"
+    assert claude.env_file == "/tmp/deepseek.env"
+
+
+def test_machine_id_connection_resolution_preserves_saved_runtime_profile() -> None:
+    class Args:
+        server = DEFAULT_SERVER
+        machine_id = "mach_claude"
+        token = None
+        cwd = ""
+        runtime_profile = None
+        runtime_profile_name = None
+        env_file = None
+        model = None
+        claude_bin = None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        Args.cwd = tmp
+        save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_claude",
+            token="token_claude",
+            provider="claude_code",
+            runtime_profile={
+                "id": "deepseek",
+                "display_name": "DeepSeek",
+                "env_file": "/tmp/deepseek.env",
+                "model": "deepseek-chat",
+            },
+            cwd=tmp,
+        )
+
+        specs = resolve_connection_specs(Args())
+
+    assert len(specs) == 1
+    assert specs[0].token == "token_claude"
+    assert specs[0].provider == "claude_code"
+    assert specs[0].runtime_profile_id == "deepseek"
+    assert specs[0].runtime_profile_name == "DeepSeek"
+    assert specs[0].env_file == "/tmp/deepseek.env"
+    assert specs[0].model == "deepseek-chat"
 
 
 def test_registration_connection_args_exit_after_token_exchange() -> None:

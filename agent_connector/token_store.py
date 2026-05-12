@@ -29,6 +29,11 @@ class SavedConnector:
     machine_id: str
     token: str
     provider: str | None = None
+    runtime_profile_id: str | None = None
+    runtime_profile_name: str | None = None
+    env_file: str | None = None
+    model: str | None = None
+    claude_bin: str | None = None
 
 
 def backend_ws_url(server_url: str, machine_id: str) -> str:
@@ -102,6 +107,13 @@ def load_connector_token(*, server_url: str, machine_id: str, cwd: str | None = 
     return token if isinstance(token, str) and token else None
 
 
+def _optional_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def _connector_from_entry(entry: Any, *, server_url: str | None = None) -> SavedConnector | None:
     if not isinstance(entry, dict):
         return None
@@ -109,6 +121,9 @@ def _connector_from_entry(entry: Any, *, server_url: str | None = None) -> Saved
     token = entry.get("token")
     server = entry.get("server") or server_url
     provider = entry.get("provider")
+    runtime_profile = entry.get("runtime_profile")
+    if not isinstance(runtime_profile, dict):
+        runtime_profile = {}
     if (
         isinstance(machine_id, str)
         and machine_id
@@ -122,6 +137,15 @@ def _connector_from_entry(entry: Any, *, server_url: str | None = None) -> Saved
             machine_id=machine_id,
             token=token,
             provider=provider if isinstance(provider, str) and provider else None,
+            runtime_profile_id=_optional_str(
+                runtime_profile.get("id") or entry.get("runtime_profile_id")
+            ),
+            runtime_profile_name=_optional_str(
+                runtime_profile.get("display_name") or entry.get("runtime_profile_name")
+            ),
+            env_file=_optional_str(runtime_profile.get("env_file") or entry.get("env_file")),
+            model=_optional_str(runtime_profile.get("model") or entry.get("model")),
+            claude_bin=_optional_str(runtime_profile.get("claude_bin") or entry.get("claude_bin")),
         )
     return None
 
@@ -152,6 +176,11 @@ def load_saved_connectors(*, server_url: str, cwd: str | None = None) -> list[Sa
                 machine_id=connector.machine_id,
                 token=connector.token,
                 provider=connector.provider,
+                runtime_profile_id=connector.runtime_profile_id,
+                runtime_profile_name=connector.runtime_profile_name,
+                env_file=connector.env_file,
+                model=connector.model,
+                claude_bin=connector.claude_bin,
             )
             key = (connector.server, connector.machine_id)
             if key not in seen:
@@ -179,18 +208,34 @@ def save_connector_token(
     machine_id: str,
     token: str,
     provider: str | None,
+    runtime_profile: dict[str, Any] | None = None,
     cwd: str | None = None,
 ) -> Path:
     read_path = read_token_store_path(cwd)
     path = token_store_path(cwd)
     data = load_token_store(read_path)
     connectors = data.setdefault("connectors", {})
-    connectors[token_store_key(server_url, machine_id)] = {
+    entry: JsonDict = {
         "server": normalized_server_url(server_url),
         "machine_id": machine_id,
         "provider": provider,
         "token": token,
     }
+    if runtime_profile:
+        saved_profile: JsonDict = {}
+        for key in (
+            "id",
+            "display_name",
+            "env_file",
+            "model",
+            "claude_bin",
+        ):
+            value = _optional_str(runtime_profile.get(key))
+            if value is not None:
+                saved_profile[key] = value
+        if saved_profile:
+            entry["runtime_profile"] = saved_profile
+    connectors[token_store_key(server_url, machine_id)] = entry
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
