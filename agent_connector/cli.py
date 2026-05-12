@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", default=None, help="optional default workspace root")
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
+    parser.add_argument(
+        "--claude-bin",
+        default=os.environ.get("BOTSDOCK_CLAUDE_BIN")
+        or os.environ.get("CLAUDE_CODE_BIN"),
+        help="Claude Code CLI path. Defaults to BOTSDOCK_CLAUDE_BIN or CLAUDE_CODE_BIN; otherwise the Agent SDK chooses its bundled CLI.",
+    )
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--open-timeout", type=float, default=60)
     parser.add_argument("--ping-timeout", type=float, default=60)
@@ -554,6 +560,7 @@ async def run_claude_provider_session(
         if getattr(args, "default_workspace_cwd", None)
         else (connector_cwd,),
         model=args.model,
+        cli_path=getattr(args, "claude_bin", None),
         approval_timeout_seconds=args.approval_timeout,
     )
     connector = ClaudeCodeConnector(provider=provider, outbound=outbound)

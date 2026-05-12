@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a minimal Claude Agent SDK smoke test")
     parser.add_argument("--cwd", default=".", help="working directory for Claude Code")
     parser.add_argument("--model", default=None)
+    parser.add_argument("--claude-bin", default=None, help="Claude Code CLI path")
     parser.add_argument("--prompt", default="Reply with one short sentence.")
     parser.add_argument("--max-events", type=int, default=20)
     parser.add_argument("--timeout-seconds", type=float, default=120)
@@ -73,10 +74,13 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         "tools": {"type": "preset", "preset": "claude_code"},
         "allowed_tools": ["Read", "Glob", "Grep", "LS"],
         "permission_mode": "dontAsk",
-        "setting_sources": ["project", "local"],
+        "setting_sources": ["user", "project", "local"],
+        "env": {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-agent-connector-smoke"},
     }
     if args.model:
         options_kwargs["model"] = args.model
+    if args.claude_bin:
+        options_kwargs["cli_path"] = args.claude_bin
     options = ClaudeAgentOptions(**options_kwargs)
     events: list[dict[str, Any]] = []
 

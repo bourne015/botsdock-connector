@@ -53,6 +53,15 @@ Historical projects come from Claude Code's own session index, and new turns
 should receive an explicit workspace `cwd` from BotsDock. `--cwd <path>` is only
 an optional fallback default for debugging or one-off local setups.
 
+Claude Code runs through the local CLI configuration available to the connector
+process. By default the Claude Agent SDK chooses its bundled CLI. Set
+`BOTSDOCK_CLAUDE_BIN`, `CLAUDE_CODE_BIN`, or pass `--claude-bin <path>` only if
+you need a specific SDK-compatible CLI binary or wrapper. The connector loads
+user, project, and local Claude settings and forwards Anthropic/Claude Code
+environment variables, so third-party API gateways configured through
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or related model variables are
+visible to the SDK child process.
+
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude
 Agent SDK session APIs, then falls back to local transcript JSONL files under

@@ -129,6 +129,13 @@ def _clean_transcript_text(value: Any) -> str | None:
     return stripped or None
 
 
+def _is_auth_required_text(value: str | None) -> bool:
+    if not value:
+        return False
+    lowered = value.strip().lower()
+    return "not logged in" in lowered and "/login" in lowered
+
+
 def _encoded_claude_cwd(cwd: str) -> str:
     path = str(Path(cwd or ".").expanduser().resolve())
     return "".join(char if char.isalnum() else "-" for char in path)
@@ -517,6 +524,7 @@ class ClaudeAgentSdkProvider:
         default_cwd: str | None = None,
         exclude_history_cwds: list[str] | tuple[str, ...] = (),
         model: str | None = None,
+        cli_path: str | None = None,
         approval_timeout_seconds: float = 900,
     ) -> None:
         self.cwd = cwd
@@ -527,6 +535,7 @@ class ClaudeAgentSdkProvider:
             if item
         }
         self.model = model
+        self.cli_path = cli_path
         self.approval_timeout_seconds = approval_timeout_seconds
         self._sdk: Any | None = None
         self._sdk_types: Any | None = None
@@ -1017,9 +1026,12 @@ class ClaudeAgentSdkProvider:
             "tools": {"type": "preset", "preset": "claude_code"},
             "allowed_tools": list(_AUTO_ALLOW_TOOLS),
             "permission_mode": permission_mode,
-            "setting_sources": ["project", "local"],
+            "setting_sources": ["user", "project", "local"],
+            "env": self._claude_env_overrides(),
             "can_use_tool": None if permission_mode == "dontAsk" else can_use_tool,
         }
+        if self.cli_path:
+            kwargs["cli_path"] = self.cli_path
         if model:
             kwargs["model"] = model
         if provider_session_id:
@@ -1027,6 +1039,13 @@ class ClaudeAgentSdkProvider:
         if reasoning_effort in {"low", "medium", "high", "max"}:
             kwargs["effort"] = reasoning_effort
         return self._sdk.ClaudeAgentOptions(**kwargs)
+
+    def _claude_env_overrides(self) -> dict[str, str]:
+        env = {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-agent-connector"}
+        for key, value in os.environ.items():
+            if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_")):
+                env[key] = value
+        return env
 
     def _build_permission_handler(
         self,
@@ -1098,6 +1117,8 @@ class ClaudeAgentSdkProvider:
             provider_event_id = _string(getattr(block, "id", None)) or message_id
             if block_type == "TextBlock":
                 text = _string(getattr(block, "text", None))
+                if _is_auth_required_text(text):
+                    continue
                 if text:
                     envelopes.append(
                         self._envelope(

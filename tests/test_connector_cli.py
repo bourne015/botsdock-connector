@@ -74,6 +74,17 @@ def test_claude_message_mapping_uses_unified_event_shape() -> None:
     assert envelopes[1].payload["command"] == "pwd"
 
 
+def test_claude_auth_prompt_text_is_not_mapped_as_assistant_message() -> None:
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    message = AssistantMessage(
+        content=[TextBlock("Not logged in · Please run /login")],
+    )
+
+    envelopes = provider.map_message(_request(), message)
+
+    assert envelopes == []
+
+
 def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     provider = ClaudeAgentSdkProvider(cwd=".")
     hello = provider_hello(provider, connector_version="test")
@@ -408,6 +419,38 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
     assert turn["items"][1]["text"] == "hi"
     assert turn["items"][2]["command"] == "pwd"
     assert turn["items"][2]["aggregatedOutput"] == "workspace"
+
+
+def test_claude_options_use_user_cli_settings_and_env() -> None:
+    class FakeSdk:
+        @staticmethod
+        def ClaudeAgentOptions(**kwargs):
+            return kwargs
+
+    provider = ClaudeAgentSdkProvider(
+        cwd=".",
+        default_cwd=".",
+        cli_path="/usr/local/bin/claude",
+    )
+    provider._sdk = FakeSdk()
+    previous = os.environ.get("ANTHROPIC_BASE_URL")
+    os.environ["ANTHROPIC_BASE_URL"] = "https://example.test/anthropic"
+    try:
+        options = provider._build_options(
+            _request(),
+            cwd=Path(".").resolve(),
+            can_use_tool=None,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
+        else:
+            os.environ["ANTHROPIC_BASE_URL"] = previous
+
+    assert options["cli_path"] == "/usr/local/bin/claude"
+    assert options["setting_sources"] == ["user", "project", "local"]
+    assert options["env"]["ANTHROPIC_BASE_URL"] == "https://example.test/anthropic"
+    assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-agent-connector"
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:
