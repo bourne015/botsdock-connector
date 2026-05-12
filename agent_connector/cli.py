@@ -196,6 +196,32 @@ def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) 
     return hello
 
 
+def _runtime_profile_log_line(profile: JsonDict) -> str:
+    keys = profile.get("env_keys") if isinstance(profile.get("env_keys"), list) else []
+    visible_keys = [str(key) for key in keys[:16]]
+    if len(keys) > len(visible_keys):
+        visible_keys.append(f"+{len(keys) - len(visible_keys)} more")
+    env_keys = ",".join(visible_keys) if visible_keys else "none"
+    env_file = "configured" if profile.get("env_file_configured") else "none"
+    model = profile.get("model") or "default"
+    return (
+        "agent connector claude runtime: "
+        f"profile={profile.get('id') or DEFAULT_RUNTIME_PROFILE_ID} "
+        f"auth_source={profile.get('auth_source') or 'unknown'} "
+        f"cli={profile.get('cli_label') or 'sdk_default'} "
+        f"model={model} env_file={env_file} env_keys={env_keys}"
+    )
+
+
+def _should_warn_missing_claude_env(profile: JsonDict) -> bool:
+    keys = profile.get("env_keys")
+    return (
+        profile.get("auth_source") == "claude_cli_settings"
+        and not keys
+        and not profile.get("env_file_configured")
+    )
+
+
 def workspace_report(cwd: str) -> JsonDict:
     path = str(Path(cwd).expanduser().resolve())
     return {
@@ -790,6 +816,15 @@ async def run_claude_provider_session(
         env_file=getattr(args, "env_file", None),
         approval_timeout_seconds=args.approval_timeout,
     )
+    runtime_profile = provider.runtime_profile_report()
+    print(_runtime_profile_log_line(runtime_profile), file=sys.stderr)
+    if _should_warn_missing_claude_env(runtime_profile):
+        print(
+            "agent connector claude runtime warning: no exported Claude provider env keys detected; "
+            "if your Claude CLI uses a third-party gateway, start the connector from that exported "
+            "shell or set --env-file ~/.botsdock/agent_connector.env",
+            file=sys.stderr,
+        )
     connector = ClaudeCodeConnector(provider=provider, outbound=outbound)
     hello = provider_hello(provider, connector_version=args.connector_version)
     await websocket.send(json.dumps(hello, separators=(",", ":")))

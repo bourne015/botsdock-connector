@@ -139,6 +139,7 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     assert hello["active_runtime_profile_id"] == "deepseek"
     assert hello["runtime_profiles"][0]["display_name"] == "DeepSeek"
     assert hello["runtime_profiles"][0]["auth_source"] == "env_file"
+    assert "ANTHROPIC_API_KEY" in hello["runtime_profiles"][0]["env_keys"]
     assert "ANTHROPIC_AUTH_TOKEN" in hello["runtime_profiles"][0]["env_keys"]
     assert "secret" not in json.dumps(hello)
 
@@ -586,6 +587,27 @@ def test_claude_options_use_user_cli_settings_and_env() -> None:
     assert options["setting_sources"] == ["user", "project", "local"]
     assert options["env"]["ANTHROPIC_BASE_URL"] == "https://example.test/anthropic"
     assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-agent-connector"
+
+
+def test_claude_env_auth_token_is_mirrored_for_sdk_resume() -> None:
+    provider = ClaudeAgentSdkProvider(
+        cwd=".",
+        env_overrides={
+            "ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "token-from-env-file",
+            "OPENAI_API_KEY": "openai-token",
+            "HTTPS_PROXY": "http://127.0.0.1:7890",
+        },
+    )
+
+    env = provider._claude_env_overrides()
+    report = provider.runtime_profile_report()
+
+    assert env["ANTHROPIC_API_KEY"] == "token-from-env-file"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "token-from-env-file"
+    assert "OPENAI_API_KEY" in report["env_keys"]
+    assert "HTTPS_PROXY" in report["env_keys"]
+    assert "token-from-env-file" not in json.dumps(report)
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:

@@ -79,6 +79,13 @@ The env file is read only by the local connector process and is never sent to
 BotsDock. You can also point at another file with `BOTSDOCK_AGENT_ENV_FILE` or
 `--env-file`.
 
+启动 Claude Code provider 时，connector 会在本地日志里打印 runtime profile
+摘要，只包含 profile id、CLI 标签、模型名、env key 名称和 env 文件是否配置，
+不会打印任何 token 值。对于 DeepSeek 这类 Anthropic-compatible 网关，如果
+本地只设置了 `ANTHROPIC_AUTH_TOKEN`，connector 会仅在 SDK 子进程环境里把它
+镜像为 `ANTHROPIC_API_KEY`，避免 Claude Agent SDK 的会话恢复流程误判为需要
+Claude App/Keychain 登录。
+
 ## Runtime profiles
 
 同一台物理机器可以注册多个 Claude Code machine，并让它们使用不同的本地
