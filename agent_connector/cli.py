@@ -99,7 +99,9 @@ def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) 
             "app_server.turn_cancel",
             "app_server.approval_respond",
             "connector.sync_snapshot",
+            "connector.thread_history",
             "workspace.report",
+            "thread.sync",
         ],
         "provider_runtime": {
             "name": provider.name,
@@ -228,20 +230,9 @@ class ClaudeCodeConnector:
                 },
             )
         if msg_type == "connector.sync_snapshot":
-            return ok_response(request_id, empty_thread_sync_report())
+            return ok_response(request_id, self.provider.thread_sync_report())
         if msg_type == "connector.thread_history":
-            return ok_response(
-                request_id,
-                {
-                    "type": "thread.history",
-                    "provider": self.provider.name,
-                    "thread_id": payload.get("thread_id"),
-                    "turns": [],
-                    "has_more_before": False,
-                    "next_cursor": None,
-                    "direction": payload.get("direction") or "latest",
-                },
-            )
+            return ok_response(request_id, self.provider.read_thread_history(payload))
         if msg_type == "app_server.account_snapshot":
             return ok_response(
                 request_id,
@@ -567,6 +558,7 @@ async def run_claude_provider_session(
         )
         return
     await websocket.send(json.dumps(workspace_report(connector_cwd), separators=(",", ":")))
+    await websocket.send(json.dumps(provider.thread_sync_report(), separators=(",", ":")))
 
     async def outbound_writer() -> None:
         while True:

@@ -48,9 +48,12 @@ botsdock-agent-connector
 Pass `--machine-id <id>` without `--token` when you want to debug just one saved
 machine connection.
 
-Claude Code does not currently expose a Codex-style thread history listing API
-through the SDK. The connector returns an empty history page for explicit history
-requests; live turns started through BotsDock are still persisted by Codex Web.
+Claude Code history import is best-effort and isolated inside the
+`claude_code` provider driver. The connector first tries the official Claude
+Agent SDK session APIs, then falls back to local transcript JSONL files under
+Claude Code's project history directory. Imported history is converted to the
+same `thread.sync` and `thread.history` shapes used by the rest of BotsDock.
+Live turns started through BotsDock remain the source of truth for new events.
 
 ## Protocol
 

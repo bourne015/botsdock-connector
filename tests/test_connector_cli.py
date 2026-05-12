@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from agent_connector.cli import (
     ClaudeCodeConnector,
@@ -179,29 +182,102 @@ def test_registration_connection_args_exit_after_token_exchange() -> None:
     assert connection_args.registration_only is True
 
 
-def test_claude_thread_history_returns_empty_history_shape() -> None:
-    async def run() -> dict:
-        provider = ClaudeAgentSdkProvider(cwd=".")
-        connector = ClaudeCodeConnector(provider=provider, outbound=asyncio.Queue())
-        response = await connector.handle_backend_message(
-            {
-                "type": "connector.thread_history",
-                "request_id": "req_1",
-                "payload": {
-                    "thread_id": "thread_1",
-                    "direction": "latest",
-                },
-            }
+def test_claude_thread_sync_and_history_read_local_transcript() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        transcript = Path(tmp) / "session_1.jsonl"
+        transcript.write_text(
+            "\n".join(
+                json.dumps(item)
+                for item in [
+                    {
+                        "type": "user",
+                        "uuid": "user_1",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "sessionId": "session_1",
+                        "message": {"role": "user", "content": "hello"},
+                    },
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant_1",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "sessionId": "session_1",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "hi"},
+                                {
+                                    "type": "tool_use",
+                                    "id": "tool_1",
+                                    "name": "Bash",
+                                    "input": {"command": "pwd"},
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "uuid": "tool_result_1",
+                        "timestamp": "2026-01-01T00:00:02Z",
+                        "sessionId": "session_1",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "tool_1",
+                                    "content": "workspace",
+                                }
+                            ],
+                        },
+                    },
+                ]
+            ),
+            encoding="utf-8",
         )
-        assert response is not None
-        return response
+        previous = os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR")
+        os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = tmp
+        try:
+            async def run() -> tuple[dict, dict]:
+                provider = ClaudeAgentSdkProvider(cwd=tmp)
+                connector = ClaudeCodeConnector(provider=provider, outbound=asyncio.Queue())
+                sync_response = await connector.handle_backend_message(
+                    {"type": "connector.sync_snapshot", "request_id": "req_sync"}
+                )
+                history_response = await connector.handle_backend_message(
+                    {
+                        "type": "connector.thread_history",
+                        "request_id": "req_1",
+                        "payload": {
+                            "thread_id": "thread_1",
+                            "provider_session_id": "session_1",
+                            "direction": "latest",
+                        },
+                    }
+                )
+                assert sync_response is not None
+                assert history_response is not None
+                return sync_response, history_response
 
-    response = asyncio.run(run())
+            sync_response, history_response = asyncio.run(run())
+        finally:
+            if previous is None:
+                os.environ.pop("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR", None)
+            else:
+                os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = previous
 
-    assert response["status"] == "ok"
-    assert response["payload"]["type"] == "thread.history"
-    assert response["payload"]["turns"] == []
-    assert response["payload"]["has_more_before"] is False
+    assert sync_response["status"] == "ok"
+    assert sync_response["payload"]["threads"][0]["provider_session_id"] == "session_1"
+    assert history_response["status"] == "ok"
+    assert history_response["payload"]["type"] == "thread.history"
+    turn = history_response["payload"]["turns"][0]
+    assert [item["type"] for item in turn["items"]] == [
+        "userMessage",
+        "agentMessage",
+        "commandExecution",
+    ]
+    assert turn["items"][1]["text"] == "hi"
+    assert turn["items"][2]["command"] == "pwd"
+    assert turn["items"][2]["aggregatedOutput"] == "workspace"
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:

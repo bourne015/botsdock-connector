@@ -4,7 +4,9 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -20,6 +22,8 @@ _AUTO_ALLOW_TOOLS = (
 )
 _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _BASH_TOOL = "Bash"
+_TRANSCRIPT_SCAN_LIMIT = 200
+_SESSION_SYNC_LIMIT = 200
 
 
 class ClaudeAgentSdkRuntimeMissing(RuntimeError):
@@ -85,6 +89,341 @@ def _approval_decision_allows(response: JsonDict | None) -> bool:
         ).lower()
         return decision in {"approved", "approve", "allow", "allowed", "yes"}
     return False
+
+
+def _timestamp_seconds(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number = number / 1000
+        return int(number)
+    if isinstance(value, str) and value:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            return int(datetime.fromisoformat(text).timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+def _encoded_claude_cwd(cwd: str) -> str:
+    path = str(Path(cwd or ".").expanduser().resolve())
+    return "".join(char if char.isalnum() else "-" for char in path)
+
+
+def _transcript_search_roots(cwd: str) -> list[Path]:
+    roots: list[Path] = []
+    env_paths = [
+        os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_FILE"),
+        os.environ.get("CLAUDE_CODE_TRANSCRIPT_FILE"),
+    ]
+    env_dirs = [
+        os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"),
+        os.environ.get("CLAUDE_CODE_TRANSCRIPT_DIR"),
+    ]
+    for value in env_paths:
+        if value:
+            roots.append(Path(value).expanduser())
+    for value in env_dirs:
+        if value:
+            roots.extend(Path(part).expanduser() for part in value.split(os.pathsep) if part)
+    home_projects = Path.home() / ".claude" / "projects"
+    roots.append(home_projects / _encoded_claude_cwd(cwd))
+    roots.append(home_projects)
+    return roots
+
+
+def _candidate_transcript_files(cwd: str, *, limit: int = _TRANSCRIPT_SCAN_LIMIT) -> list[Path]:
+    files: list[Path] = []
+    seen: set[str] = set()
+    for root in _transcript_search_roots(cwd):
+        try:
+            if root.is_file() and root.suffix == ".jsonl":
+                candidates = [root]
+            elif root.is_dir():
+                pattern = "*.jsonl" if root.parent.name == "projects" else "**/*.jsonl"
+                candidates = list(root.glob(pattern))
+            else:
+                candidates = []
+        except OSError:
+            candidates = []
+        for candidate in candidates:
+            try:
+                resolved = str(candidate.resolve())
+            except OSError:
+                resolved = str(candidate)
+            if resolved in seen or candidate.name.startswith("."):
+                continue
+            seen.add(resolved)
+            files.append(candidate)
+    files.sort(key=lambda path: _path_mtime(path), reverse=True)
+    return files[:limit]
+
+
+def _path_mtime(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return 0
+
+
+def _load_jsonl(path: Path) -> list[JsonDict]:
+    records: list[JsonDict] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    records.append(value)
+    except OSError:
+        return []
+    return records
+
+
+def _record_session_id(record: JsonDict) -> str | None:
+    message = record.get("message") if isinstance(record.get("message"), dict) else {}
+    for key in ("session_id", "sessionId", "sessionID", "conversation_id", "conversationId"):
+        value = record.get(key) or message.get(key)
+        text = _string(value)
+        if text:
+            return text
+    return None
+
+
+def _find_transcript_file(cwd: str, session_id: str | None) -> Path | None:
+    if not session_id:
+        return None
+    candidates = _candidate_transcript_files(cwd)
+    for path in candidates:
+        if path.stem == session_id or session_id in path.name:
+            return path
+    for path in candidates:
+        for record in _load_jsonl(path)[:20]:
+            if _record_session_id(record) == session_id:
+                return path
+    return None
+
+
+def _record_role(record: JsonDict) -> str | None:
+    message = record.get("message") if isinstance(record.get("message"), dict) else {}
+    for role in (record.get("role"), message.get("role"), record.get("type")):
+        if role in {"user", "assistant"}:
+            return str(role)
+    return None
+
+
+def _record_uuid(record: JsonDict, index: int) -> str:
+    message = record.get("message") if isinstance(record.get("message"), dict) else {}
+    return (
+        _string(record.get("uuid"))
+        or _string(record.get("id"))
+        or _string(message.get("id"))
+        or f"item-{index}"
+    )
+
+
+def _message_content(record: JsonDict) -> Any:
+    message = record.get("message")
+    if isinstance(message, dict) and "content" in message:
+        return message.get("content")
+    if "content" in record:
+        return record.get("content")
+    return message
+
+
+def _content_blocks(content: Any) -> list[Any]:
+    if isinstance(content, list):
+        return content
+    return [content] if content is not None else []
+
+
+def _extract_content_text(content: Any, *, include_tool_results: bool = False) -> str | None:
+    parts: list[str] = []
+    for block in _content_blocks(content):
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text")
+        elif block_type == "thinking":
+            text = block.get("thinking")
+        elif block_type == "tool_result" and include_tool_results:
+            text = block.get("content")
+        elif block_type is None:
+            text = block.get("text") or block.get("content")
+        else:
+            text = None
+        if isinstance(text, list):
+            nested = _extract_content_text(text, include_tool_results=True)
+            if nested:
+                parts.append(nested)
+        elif text:
+            parts.append(str(text))
+    text = "\n".join(part for part in parts if part).strip()
+    return text or None
+
+
+def _content_has_user_text(content: Any) -> bool:
+    for block in _content_blocks(content):
+        if isinstance(block, str) and block.strip():
+            return True
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            if block_type == "tool_result":
+                continue
+            text = block.get("text") or block.get("content")
+            if text:
+                return True
+    return False
+
+
+def _apply_tool_results_to_pending(content: Any, pending: dict[str, JsonDict]) -> None:
+    for block in _content_blocks(content):
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_use_id = _string(block.get("tool_use_id") or block.get("toolUseId"))
+        if not tool_use_id or tool_use_id not in pending:
+            continue
+        item = pending[tool_use_id]
+        output = _extract_content_text(block.get("content"), include_tool_results=True)
+        item["aggregatedOutput"] = output or ""
+        item["status"] = "failed" if block.get("is_error") or block.get("isError") else "completed"
+
+
+def _assistant_items_from_content(content: Any, *, base_id: str) -> list[JsonDict]:
+    items: list[JsonDict] = []
+    text_parts: list[str] = []
+    for block_index, block in enumerate(_content_blocks(content)):
+        if isinstance(block, str):
+            text_parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text = _string(block.get("text"))
+            if text:
+                text_parts.append(text)
+        elif block_type == "thinking":
+            text = _string(block.get("thinking"))
+            if text:
+                items.append(
+                    {
+                        "id": _string(block.get("id")) or f"{base_id}:thinking:{block_index}",
+                        "type": "reasoning",
+                        "text": text,
+                    }
+                )
+        elif block_type == "tool_use":
+            name = _string(block.get("name")) or "tool"
+            input_data = block.get("input") if isinstance(block.get("input"), dict) else {}
+            if name == _BASH_TOOL:
+                command = _string(input_data.get("command")) or name
+                items.append(
+                    {
+                        "id": _string(block.get("id")) or f"{base_id}:tool:{block_index}",
+                        "type": "commandExecution",
+                        "command": command,
+                        "aggregatedOutput": "",
+                        "status": "completed",
+                    }
+                )
+    if text_parts:
+        items.insert(
+            0,
+            {
+                "id": f"{base_id}:assistant",
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "\n".join(text_parts).strip(),
+            },
+        )
+    return [item for item in items if item.get("text") or item.get("command")]
+
+
+def _messages_to_history_turns(
+    *,
+    session_id: str,
+    messages: list[JsonDict],
+) -> list[JsonDict]:
+    turns: list[JsonDict] = []
+    current: JsonDict | None = None
+    pending_commands: dict[str, JsonDict] = {}
+
+    def start_turn(record: JsonDict, index: int, text: str | None = None) -> JsonDict:
+        item_id = _record_uuid(record, index)
+        started_at = _timestamp_seconds(record.get("timestamp"))
+        turn = {
+            "id": f"claude-{session_id}-{item_id}"[:128],
+            "status": "completed",
+            "source": "claude_code_transcript",
+            "startedAt": started_at,
+            "completedAt": started_at,
+            "items": [],
+        }
+        if text:
+            turn["items"].append(
+                {
+                    "id": f"{item_id}:user",
+                    "type": "userMessage",
+                    "content": text,
+                }
+            )
+        turns.append(turn)
+        return turn
+
+    for index, record in enumerate(messages):
+        role = _record_role(record)
+        if role is None:
+            continue
+        content = _message_content(record)
+        item_id = _record_uuid(record, index)
+        timestamp = _timestamp_seconds(record.get("timestamp"))
+        if role == "user":
+            _apply_tool_results_to_pending(content, pending_commands)
+            if not _content_has_user_text(content):
+                continue
+            text = _extract_content_text(content)
+            if not text:
+                continue
+            current = start_turn(record, index, text)
+        elif role == "assistant":
+            if current is None:
+                current = start_turn(record, index)
+            for item in _assistant_items_from_content(content, base_id=item_id):
+                current["items"].append(item)
+                if item.get("type") == "commandExecution":
+                    pending_commands[str(item["id"])] = item
+            if timestamp:
+                current["completedAt"] = timestamp
+    return [turn for turn in turns if turn.get("items")]
+
+
+def _page_turns(turns: list[JsonDict], *, limit: int, cursor: Any) -> tuple[list[JsonDict], str | None]:
+    limit = max(1, min(int(limit or 20), 50))
+    total = len(turns)
+    if cursor is None:
+        start = max(0, total - limit)
+        page = turns[start:total]
+    else:
+        try:
+            end = max(0, min(total, int(str(cursor))))
+        except ValueError:
+            end = total
+        start = max(0, end - limit)
+        page = turns[start:end]
+    return page, (str(start) if start > 0 else None)
 
 
 class ClaudeAgentSdkProvider:
@@ -155,6 +494,195 @@ class ClaudeAgentSdkProvider:
         self._cancel_events.clear()
         self._sdk = None
         self._sdk_types = None
+
+    def thread_sync_report(self, *, limit: int = _SESSION_SYNC_LIMIT) -> JsonDict:
+        return {
+            "type": "thread.sync",
+            "provider": self.name,
+            "threads": self._list_history_threads(limit=limit),
+            "workspaces": [],
+        }
+
+    def read_thread_history(self, request: JsonDict) -> JsonDict:
+        session_id = (
+            _string(_payload_value(request, "provider_session_id"))
+            or _string(_payload_value(request, "provider_thread_id"))
+            or _string(_payload_value(request, "app_server_thread_id"))
+        )
+        limit = int(_payload_value(request, "limit") or 20)
+        cursor = _payload_value(request, "cursor")
+        turns = self._load_history_turns(session_id=session_id)
+        page, next_cursor = _page_turns(turns, limit=limit, cursor=cursor)
+        return {
+            "type": "thread.history",
+            "provider": self.name,
+            "thread_id": _payload_value(request, "thread_id"),
+            "provider_session_id": session_id,
+            "turns": page,
+            "has_more_before": bool(next_cursor),
+            "next_cursor": next_cursor,
+            "direction": _payload_value(request, "direction") or "latest",
+        }
+
+    def _sdk_module(self) -> Any | None:
+        if self._sdk is not None:
+            return self._sdk
+        try:
+            import claude_agent_sdk  # type: ignore
+        except ImportError:
+            return None
+        return claude_agent_sdk
+
+    def _list_history_threads(self, *, limit: int) -> list[JsonDict]:
+        # Prefer the official SDK session index when available. The JSONL
+        # scanner below is intentionally isolated as a compatibility adapter
+        # for older SDKs or environments where the SDK cannot enumerate sessions.
+        threads = self._list_threads_from_sdk(limit=limit)
+        if threads:
+            return threads
+        return self._list_threads_from_transcripts(limit=limit)
+
+    def _list_threads_from_sdk(self, *, limit: int) -> list[JsonDict]:
+        sdk = self._sdk_module()
+        list_sessions = getattr(sdk, "list_sessions", None) if sdk is not None else None
+        if not callable(list_sessions):
+            return []
+        try:
+            sessions = list_sessions(directory=self.cwd, limit=limit)
+        except Exception:
+            return []
+        threads: list[JsonDict] = []
+        for session in sessions or []:
+            thread = self._thread_from_session_info(_jsonable(session))
+            if thread is not None:
+                threads.append(thread)
+        return threads
+
+    def _list_threads_from_transcripts(self, *, limit: int) -> list[JsonDict]:
+        threads: list[JsonDict] = []
+        for path in _candidate_transcript_files(self.cwd, limit=limit):
+            records = _load_jsonl(path)
+            if not records:
+                continue
+            session_id = (
+                _record_session_id(records[0])
+                or next((_record_session_id(record) for record in records if _record_session_id(record)), None)
+                or path.stem
+            )
+            first_user = next(
+                (
+                    _extract_content_text(_message_content(record))
+                    for record in records
+                    if _record_role(record) == "user" and _content_has_user_text(_message_content(record))
+                ),
+                None,
+            )
+            created_at = next(
+                (
+                    _timestamp_seconds(record.get("timestamp"))
+                    for record in records
+                    if _timestamp_seconds(record.get("timestamp")) is not None
+                ),
+                None,
+            )
+            threads.append(
+                self._history_thread(
+                    session_id=session_id,
+                    title=first_user or f"Claude session {session_id[:8]}",
+                    preview=first_user,
+                    cwd=self.cwd,
+                    created_at=created_at,
+                    updated_at=_path_mtime(path),
+                )
+            )
+        return threads
+
+    def _thread_from_session_info(self, info: JsonDict) -> JsonDict | None:
+        session_id = _string(
+            info.get("session_id") or info.get("sessionId") or info.get("id")
+        )
+        if not session_id:
+            return None
+        title = _string(
+            info.get("summary")
+            or info.get("custom_title")
+            or info.get("customTitle")
+            or info.get("first_prompt")
+            or info.get("firstPrompt")
+        )
+        cwd = _string(info.get("cwd")) or self.cwd
+        return self._history_thread(
+            session_id=session_id,
+            title=title or f"Claude session {session_id[:8]}",
+            preview=_string(info.get("first_prompt") or info.get("firstPrompt")),
+            cwd=cwd,
+            created_at=_timestamp_seconds(info.get("created_at") or info.get("createdAt")),
+            updated_at=_timestamp_seconds(info.get("last_modified") or info.get("updatedAt")),
+            current_branch=_string(info.get("git_branch") or info.get("gitBranch")),
+        )
+
+    def _history_thread(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        preview: str | None,
+        cwd: str,
+        created_at: int | None,
+        updated_at: int | None,
+        current_branch: str | None = None,
+    ) -> JsonDict:
+        path = str(Path(cwd or self.cwd).expanduser().resolve())
+        return {
+            "id": session_id,
+            "app_server_thread_id": session_id,
+            "provider_thread_id": session_id,
+            "provider_session_id": session_id,
+            "title": title[:255],
+            "preview": preview[:255] if preview else None,
+            "status": "idle",
+            "remote_path": path,
+            "workspace_name": Path(path).name or path,
+            "current_branch": current_branch,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    def _load_history_turns(self, *, session_id: str | None) -> list[JsonDict]:
+        if not session_id:
+            return []
+        messages = self._load_messages_from_sdk(session_id)
+        if not messages:
+            messages = self._load_messages_from_transcript(session_id)
+        return _messages_to_history_turns(session_id=session_id, messages=messages)
+
+    def _load_messages_from_sdk(self, session_id: str) -> list[JsonDict]:
+        sdk = self._sdk_module()
+        get_messages = getattr(sdk, "get_session_messages", None) if sdk is not None else None
+        if not callable(get_messages):
+            return []
+        try:
+            messages = get_messages(session_id, directory=self.cwd)
+        except Exception:
+            return []
+        normalized: list[JsonDict] = []
+        for message in messages or []:
+            data = _jsonable(message)
+            if "message" not in data and "content" in data:
+                data = {
+                    "type": data.get("type") or data.get("role"),
+                    "uuid": data.get("uuid") or data.get("id"),
+                    "session_id": data.get("session_id") or session_id,
+                    "message": {"content": data.get("content")},
+                }
+            normalized.append(data)
+        return normalized
+
+    def _load_messages_from_transcript(self, session_id: str) -> list[JsonDict]:
+        path = _find_transcript_file(self.cwd, session_id)
+        if path is None:
+            return []
+        return _load_jsonl(path)
 
     async def start_turn(self, request: JsonDict) -> AsyncIterator[ProviderEnvelope]:
         if self._sdk is None:
