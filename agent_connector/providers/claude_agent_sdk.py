@@ -542,6 +542,7 @@ class ClaudeAgentSdkProvider:
         self._active_clients: dict[str, Any] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._pending_approvals: dict[str, asyncio.Future[JsonDict]] = {}
+        self._auth_required_turns: set[str] = set()
 
     async def start(self) -> None:
         # The SDK import is intentionally lazy so Codex-only deployments do not
@@ -567,6 +568,7 @@ class ClaudeAgentSdkProvider:
                     pass
         self._active_clients.clear()
         self._cancel_events.clear()
+        self._auth_required_turns.clear()
         self._sdk = None
         self._sdk_types = None
 
@@ -1118,6 +1120,9 @@ class ClaudeAgentSdkProvider:
             if block_type == "TextBlock":
                 text = _string(getattr(block, "text", None))
                 if _is_auth_required_text(text):
+                    turn_id = _string(_payload_value(request, "turn_id"))
+                    if turn_id:
+                        self._auth_required_turns.add(turn_id)
                     continue
                 if text:
                     envelopes.append(
@@ -1273,7 +1278,10 @@ class ClaudeAgentSdkProvider:
         session_id = _string(getattr(message, "session_id", None))
         turn_id = _string(_payload_value(request, "turn_id"))
         cancelled = bool(turn_id and self._cancel_events.get(turn_id, asyncio.Event()).is_set())
+        auth_required = bool(turn_id and turn_id in self._auth_required_turns)
         is_error = bool(getattr(message, "is_error", False))
+        if auth_required:
+            is_error = True
         event_type = "turn.cancelled" if cancelled else ("turn.failed" if is_error else "turn.completed")
         payload = {
             "provider": self.name,
@@ -1291,8 +1299,13 @@ class ClaudeAgentSdkProvider:
             "usage": _jsonable(getattr(message, "usage", None)),
             "model_usage": _jsonable(getattr(message, "model_usage", None)),
         }
+        if auth_required:
+            payload["error"] = "provider_auth_required"
+            payload["result"] = "Claude Code CLI is not authenticated in the connector environment"
         if is_error and not payload.get("result"):
             payload["error"] = payload.get("subtype") or "claude_code_error"
+        if turn_id:
+            self._auth_required_turns.discard(turn_id)
         return self._envelope(
             event_type,
             request,

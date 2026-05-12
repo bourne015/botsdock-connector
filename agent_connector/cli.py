@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Registration token for first connection. Omit after the connector token has been saved.",
     )
     parser.add_argument("--cwd", default=None, help="optional default workspace root")
+    parser.add_argument(
+        "--env-file",
+        default=default_env_file(),
+        help="Local env file for provider credentials. Defaults to BOTSDOCK_AGENT_ENV_FILE or ~/.botsdock/agent_connector.env when present.",
+    )
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument(
@@ -88,6 +93,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconnect-max-delay", type=float, default=30.0)
     parser.set_defaults(reconnect=True)
     return parser
+
+
+def default_env_file() -> str | None:
+    configured = os.environ.get("BOTSDOCK_AGENT_ENV_FILE")
+    if configured:
+        return configured
+    path = Path.home() / ".botsdock" / "agent_connector.env"
+    return str(path) if path.exists() else None
+
+
+def load_env_file(path: str | None) -> list[str]:
+    if not path:
+        return []
+    env_path = Path(path).expanduser()
+    if not env_path.exists():
+        raise ConnectorError(f"env file not found: {env_path}")
+    loaded: list[str] = []
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip().strip('"').strip("'")
+        if key not in os.environ:
+            os.environ[key] = value
+        loaded.append(key)
+    return loaded
 
 
 def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) -> JsonDict:
@@ -765,6 +804,12 @@ async def run_connector(args: argparse.Namespace) -> None:
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        loaded_env_keys = load_env_file(args.env_file)
+        if loaded_env_keys:
+            print(
+                f"agent connector loaded env file: {args.env_file} ({len(loaded_env_keys)} key(s))",
+                file=sys.stderr,
+            )
         asyncio.run(run_connector(args))
         return 0
     except KeyboardInterrupt:

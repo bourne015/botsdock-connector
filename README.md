@@ -62,6 +62,23 @@ environment variables, so third-party API gateways configured through
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or related model variables are
 visible to the SDK child process.
 
+If the connector is started from a shell that does not already export those
+variables, keep them in a local-only env file instead:
+
+```bash
+mkdir -p ~/.botsdock
+cat > ~/.botsdock/agent_connector.env <<'EOF'
+ANTHROPIC_BASE_URL=https://your-gateway.example/anthropic
+ANTHROPIC_AUTH_TOKEN=your-local-token
+ANTHROPIC_MODEL=your-model-name
+EOF
+botsdock-agent-connector
+```
+
+The env file is read only by the local connector process and is never sent to
+BotsDock. You can also point at another file with `BOTSDOCK_AGENT_ENV_FILE` or
+`--env-file`.
+
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude
 Agent SDK session APIs, then falls back to local transcript JSONL files under

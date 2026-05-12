@@ -12,6 +12,7 @@ from agent_connector.cli import (
     ConnectionSpec,
     _connection_args,
     envelope_to_backend_message,
+    load_env_file,
     provider_hello,
     reconnect_command,
     resolve_connection_specs,
@@ -45,6 +46,14 @@ class AssistantMessage:
     content: list
     model: str = "claude-sonnet"
     message_id: str = "msg_1"
+
+
+@dataclass
+class ResultMessage:
+    session_id: str = "session_old"
+    is_error: bool = False
+    subtype: str | None = None
+    result: str | None = None
 
 
 def _request() -> dict:
@@ -83,6 +92,47 @@ def test_claude_auth_prompt_text_is_not_mapped_as_assistant_message() -> None:
     envelopes = provider.map_message(_request(), message)
 
     assert envelopes == []
+    result = provider.map_message(_request(), ResultMessage())
+    assert [item.type for item in result] == ["turn.failed"]
+    assert result[0].payload["error"] == "provider_auth_required"
+
+
+def test_env_file_loads_missing_local_provider_credentials() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "connector.env"
+        path.write_text(
+            "\n".join(
+                [
+                    "# local only",
+                    "BOTS_TEST_AGENT_CONNECTOR_ENV=from_file",
+                    "export BOTS_TEST_AGENT_CONNECTOR_EXPORTED='quoted'",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        previous = {
+            key: os.environ.get(key)
+            for key in (
+                "BOTS_TEST_AGENT_CONNECTOR_ENV",
+                "BOTS_TEST_AGENT_CONNECTOR_EXPORTED",
+            )
+        }
+        for key in previous:
+            os.environ.pop(key, None)
+        try:
+            loaded = load_env_file(str(path))
+            assert loaded == [
+                "BOTS_TEST_AGENT_CONNECTOR_ENV",
+                "BOTS_TEST_AGENT_CONNECTOR_EXPORTED",
+            ]
+            assert os.environ["BOTS_TEST_AGENT_CONNECTOR_ENV"] == "from_file"
+            assert os.environ["BOTS_TEST_AGENT_CONNECTOR_EXPORTED"] == "quoted"
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
