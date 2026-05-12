@@ -55,7 +55,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "ok": False,
             "stage": "import",
             "error": str(err),
-            "hint": "Install with `pip install claude-agent-sdk`.",
+            "hint": "Reinstall the connector with `python3 -m pip install -e .`.",
         }
 
     version = getattr(claude_agent_sdk, "__version__", None)

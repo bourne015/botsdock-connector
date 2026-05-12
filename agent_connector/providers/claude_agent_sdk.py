@@ -621,15 +621,15 @@ class ClaudeAgentSdkProvider:
         self._auth_required_turns: set[str] = set()
 
     async def start(self) -> None:
-        # The SDK import is intentionally lazy so Codex-only deployments do not
-        # need Claude dependencies installed.
+        # Keep the import lazy so Codex-only connections do not initialize the
+        # Claude runtime unless the backend selects that provider.
         try:
             import claude_agent_sdk  # type: ignore
             import claude_agent_sdk.types as claude_agent_sdk_types  # type: ignore
         except ImportError as err:
             raise ClaudeAgentSdkRuntimeMissing(
-                "claude_agent_sdk is not installed. Install the optional "
-                "claude dependency with `pip install claude-agent-sdk`."
+                "claude_agent_sdk is not installed. Reinstall the connector "
+                "with `python3 -m pip install -e .`."
             ) from err
         self._sdk = claude_agent_sdk
         self._sdk_types = claude_agent_sdk_types

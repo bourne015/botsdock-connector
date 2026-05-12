@@ -20,12 +20,6 @@ Install the package in editable mode:
 python3 -m pip install -e .
 ```
 
-Install Claude support when needed:
-
-```bash
-python3 -m pip install -e '.[claude]'
-```
-
 Run the generated registration command once from the directory where you want
 to keep the connector token file:
 
