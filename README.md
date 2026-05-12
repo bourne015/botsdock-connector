@@ -53,6 +53,8 @@ Claude Code history import is best-effort and isolated inside the
 Agent SDK session APIs, then falls back to local transcript JSONL files under
 Claude Code's project history directory. Imported history is converted to the
 same `thread.sync` and `thread.history` shapes used by the rest of BotsDock.
+Claude transcript records that only describe local slash commands, such as
+`<local-command-caveat>` or `<local-command-stdout>`, are filtered before sync.
 Live turns started through BotsDock remain the source of truth for new events.
 
 ## Protocol

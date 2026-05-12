@@ -191,6 +191,16 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                 for item in [
                     {
                         "type": "user",
+                        "uuid": "local_caveat_1",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "sessionId": "session_1",
+                        "message": {
+                            "role": "user",
+                            "content": "<local-command-caveat>Caveat: ignore local commands</local-command-caveat>",
+                        },
+                    },
+                    {
+                        "type": "user",
                         "uuid": "user_1",
                         "timestamp": "2026-01-01T00:00:00Z",
                         "sessionId": "session_1",
@@ -230,6 +240,45 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                             ],
                         },
                     },
+                    {
+                        "type": "user",
+                        "uuid": "local_stdout_1",
+                        "timestamp": "2026-01-01T00:00:03Z",
+                        "sessionId": "session_1",
+                        "message": {
+                            "role": "user",
+                            "content": "<local-command-stdout>Goodbye!</local-command-stdout>",
+                        },
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        local_only = Path(tmp) / "session_local.jsonl"
+        local_only.write_text(
+            "\n".join(
+                json.dumps(item)
+                for item in [
+                    {
+                        "type": "user",
+                        "uuid": "local_only_1",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "sessionId": "session_local",
+                        "message": {
+                            "role": "user",
+                            "content": "<local-command-caveat>Caveat</local-command-caveat>",
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "uuid": "local_only_2",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "sessionId": "session_local",
+                        "message": {
+                            "role": "user",
+                            "content": "<command-name>/exit</command-name>",
+                        },
+                    },
                 ]
             ),
             encoding="utf-8",
@@ -266,9 +315,14 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                 os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = previous
 
     assert sync_response["status"] == "ok"
-    assert sync_response["payload"]["threads"][0]["provider_session_id"] == "session_1"
+    synced_sessions = {
+        item["provider_session_id"] for item in sync_response["payload"]["threads"]
+    }
+    assert "session_1" in synced_sessions
+    assert "session_local" not in synced_sessions
     assert history_response["status"] == "ok"
     assert history_response["payload"]["type"] == "thread.history"
+    assert len(history_response["payload"]["turns"]) == 1
     turn = history_response["payload"]["turns"][0]
     assert [item["type"] for item in turn["items"]] == [
         "userMessage",

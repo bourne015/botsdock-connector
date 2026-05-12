@@ -24,6 +24,15 @@ _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _BASH_TOOL = "Bash"
 _TRANSCRIPT_SCAN_LIMIT = 200
 _SESSION_SYNC_LIMIT = 200
+# Claude Code stores local slash-command caveats/stdout as user-role
+# transcript records. They are control metadata, not chat history.
+_LOCAL_COMMAND_TAG_PREFIXES = (
+    "<local-command-caveat",
+    "<local-command-stdout",
+    "<command-name",
+    "<command-message",
+    "<command-args",
+)
 
 
 class ClaudeAgentSdkRuntimeMissing(RuntimeError):
@@ -106,6 +115,17 @@ def _timestamp_seconds(value: Any) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _clean_transcript_text(value: Any) -> str | None:
+    text = _string(value)
+    if not text:
+        return None
+    stripped = text.strip()
+    lowered = stripped.lower()
+    if any(lowered.startswith(prefix) for prefix in _LOCAL_COMMAND_TAG_PREFIXES):
+        return None
+    return stripped or None
 
 
 def _encoded_claude_cwd(cwd: str) -> str:
@@ -249,7 +269,9 @@ def _extract_content_text(content: Any, *, include_tool_results: bool = False) -
     parts: list[str] = []
     for block in _content_blocks(content):
         if isinstance(block, str):
-            parts.append(block)
+            text = _clean_transcript_text(block)
+            if text:
+                parts.append(text)
             continue
         if not isinstance(block, dict):
             continue
@@ -269,23 +291,15 @@ def _extract_content_text(content: Any, *, include_tool_results: bool = False) -
             if nested:
                 parts.append(nested)
         elif text:
-            parts.append(str(text))
+            cleaned = _clean_transcript_text(text)
+            if cleaned:
+                parts.append(cleaned)
     text = "\n".join(part for part in parts if part).strip()
     return text or None
 
 
 def _content_has_user_text(content: Any) -> bool:
-    for block in _content_blocks(content):
-        if isinstance(block, str) and block.strip():
-            return True
-        if isinstance(block, dict):
-            block_type = block.get("type")
-            if block_type == "tool_result":
-                continue
-            text = block.get("text") or block.get("content")
-            if text:
-                return True
-    return False
+    return _extract_content_text(content) is not None
 
 
 def _apply_tool_results_to_pending(content: Any, pending: dict[str, JsonDict]) -> None:
@@ -306,17 +320,19 @@ def _assistant_items_from_content(content: Any, *, base_id: str) -> list[JsonDic
     text_parts: list[str] = []
     for block_index, block in enumerate(_content_blocks(content)):
         if isinstance(block, str):
-            text_parts.append(block)
+            text = _clean_transcript_text(block)
+            if text:
+                text_parts.append(text)
             continue
         if not isinstance(block, dict):
             continue
         block_type = block.get("type")
         if block_type == "text":
-            text = _string(block.get("text"))
+            text = _clean_transcript_text(block.get("text"))
             if text:
                 text_parts.append(text)
         elif block_type == "thinking":
-            text = _string(block.get("thinking"))
+            text = _clean_transcript_text(block.get("thinking"))
             if text:
                 items.append(
                     {
@@ -569,11 +585,15 @@ class ClaudeAgentSdkProvider:
                 or next((_record_session_id(record) for record in records if _record_session_id(record)), None)
                 or path.stem
             )
+            turns = _messages_to_history_turns(session_id=session_id, messages=records)
+            if not turns:
+                continue
             first_user = next(
                 (
-                    _extract_content_text(_message_content(record))
-                    for record in records
-                    if _record_role(record) == "user" and _content_has_user_text(_message_content(record))
+                    _string(item.get("content"))
+                    for turn in turns
+                    for item in turn.get("items", [])
+                    if isinstance(item, dict) and item.get("type") == "userMessage"
                 ),
                 None,
             )
@@ -610,11 +630,13 @@ class ClaudeAgentSdkProvider:
             or info.get("first_prompt")
             or info.get("firstPrompt")
         )
+        title = _clean_transcript_text(title)
+        preview = _clean_transcript_text(info.get("first_prompt") or info.get("firstPrompt"))
         cwd = _string(info.get("cwd")) or self.cwd
         return self._history_thread(
             session_id=session_id,
             title=title or f"Claude session {session_id[:8]}",
-            preview=_string(info.get("first_prompt") or info.get("firstPrompt")),
+            preview=preview,
             cwd=cwd,
             created_at=_timestamp_seconds(info.get("created_at") or info.get("createdAt")),
             updated_at=_timestamp_seconds(info.get("last_modified") or info.get("updatedAt")),
