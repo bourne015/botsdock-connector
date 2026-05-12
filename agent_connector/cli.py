@@ -214,12 +214,7 @@ def _runtime_profile_log_line(profile: JsonDict) -> str:
 
 
 def _should_warn_missing_claude_env(profile: JsonDict) -> bool:
-    keys = profile.get("env_keys")
-    return (
-        profile.get("auth_source") == "claude_cli_settings"
-        and not keys
-        and not profile.get("env_file_configured")
-    )
+    return not profile.get("has_claude_auth_env") and not profile.get("env_file_configured")
 
 
 def workspace_report(cwd: str) -> JsonDict:

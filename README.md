@@ -75,6 +75,12 @@ EOF
 botsdock-agent-connector
 ```
 
+On macOS with zsh, variables in `~/.zprofile` are only loaded for login shells.
+If `botsdock-agent-connector` logs `env_keys` without `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, either run `source ~/.zprofile`
+before starting the connector, move those exports to `~/.zshrc`, or use the
+dedicated `~/.botsdock/agent_connector.env` file above.
+
 The env file is read only by the local connector process and is never sent to
 BotsDock. You can also point at another file with `BOTSDOCK_AGENT_ENV_FILE` or
 `--env-file`.

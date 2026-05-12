@@ -58,10 +58,12 @@ _RUNTIME_ENV_NAMES = {
     "https_proxy",
     "no_proxy",
 }
-_AUTH_ENV_KEYS = {
+_CLAUDE_AUTH_ENV_KEYS = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+}
+_GATEWAY_AUTH_ENV_KEYS = {
     "DASHSCOPE_API_KEY",
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -645,8 +647,9 @@ class ClaudeAgentSdkProvider:
         auth_source = "claude_cli_settings"
         if self.env_file and self.env_overrides:
             auth_source = "env_file"
-        elif any(key in env_keys for key in _AUTH_ENV_KEYS):
+        elif any(key in env_keys for key in _CLAUDE_AUTH_ENV_KEYS):
             auth_source = "environment"
+        gateway_env_keys = sorted(key for key in env_keys if key in _GATEWAY_AUTH_ENV_KEYS)
         model = (
             self.model
             or self.env_overrides.get("ANTHROPIC_MODEL")
@@ -662,6 +665,8 @@ class ClaudeAgentSdkProvider:
             "runtime": "claude_agent_sdk",
             "auth_source": auth_source,
             "env_keys": env_keys,
+            "gateway_env_keys": gateway_env_keys,
+            "has_claude_auth_env": any(key in env_keys for key in _CLAUDE_AUTH_ENV_KEYS),
             "env_file_configured": bool(self.env_file),
             "model": model,
             "cli_label": Path(self.cli_path).name if self.cli_path else "sdk_default",

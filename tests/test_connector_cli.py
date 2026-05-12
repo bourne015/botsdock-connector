@@ -141,6 +141,7 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     assert hello["runtime_profiles"][0]["auth_source"] == "env_file"
     assert "ANTHROPIC_API_KEY" in hello["runtime_profiles"][0]["env_keys"]
     assert "ANTHROPIC_AUTH_TOKEN" in hello["runtime_profiles"][0]["env_keys"]
+    assert hello["runtime_profiles"][0]["has_claude_auth_env"] is True
     assert "secret" not in json.dumps(hello)
 
     envelope = provider._envelope(
@@ -608,6 +609,33 @@ def test_claude_env_auth_token_is_mirrored_for_sdk_resume() -> None:
     assert "OPENAI_API_KEY" in report["env_keys"]
     assert "HTTPS_PROXY" in report["env_keys"]
     assert "token-from-env-file" not in json.dumps(report)
+
+
+def test_openai_key_alone_is_not_reported_as_claude_auth() -> None:
+    auth_keys = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    previous = {key: os.environ.get(key) for key in auth_keys}
+    for key in auth_keys:
+        os.environ.pop(key, None)
+    try:
+        provider = ClaudeAgentSdkProvider(
+            cwd=".",
+            env_overrides={
+                "OPENAI_API_KEY": "openai-token",
+                "HTTPS_PROXY": "http://127.0.0.1:7890",
+            },
+        )
+        report = provider.runtime_profile_report()
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert report["auth_source"] == "claude_cli_settings"
+    assert report["has_claude_auth_env"] is False
+    assert report["gateway_env_keys"] == ["OPENAI_API_KEY"]
+    assert "openai-token" not in json.dumps(report)
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:
