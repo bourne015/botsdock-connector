@@ -194,6 +194,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                         "uuid": "local_caveat_1",
                         "timestamp": "2026-01-01T00:00:00Z",
                         "sessionId": "session_1",
+                        "cwd": tmp,
                         "message": {
                             "role": "user",
                             "content": "<local-command-caveat>Caveat: ignore local commands</local-command-caveat>",
@@ -204,6 +205,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                         "uuid": "user_1",
                         "timestamp": "2026-01-01T00:00:00Z",
                         "sessionId": "session_1",
+                        "cwd": tmp,
                         "message": {"role": "user", "content": "hello"},
                     },
                     {
@@ -211,6 +213,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                         "uuid": "assistant_1",
                         "timestamp": "2026-01-01T00:00:01Z",
                         "sessionId": "session_1",
+                        "cwd": tmp,
                         "message": {
                             "role": "assistant",
                             "content": [
@@ -229,6 +232,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                         "uuid": "tool_result_1",
                         "timestamp": "2026-01-01T00:00:02Z",
                         "sessionId": "session_1",
+                        "cwd": tmp,
                         "message": {
                             "role": "user",
                             "content": [
@@ -245,6 +249,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
                         "uuid": "local_stdout_1",
                         "timestamp": "2026-01-01T00:00:03Z",
                         "sessionId": "session_1",
+                        "cwd": tmp,
                         "message": {
                             "role": "user",
                             "content": "<local-command-stdout>Goodbye!</local-command-stdout>",

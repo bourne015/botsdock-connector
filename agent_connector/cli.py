@@ -43,6 +43,7 @@ class ConnectionSpec:
     token: str
     cwd: str
     provider: str | None = None
+    default_workspace_cwd: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Registration token for first connection. Omit after the connector token has been saved.",
     )
-    parser.add_argument("--cwd", default=".", help="workspace root")
+    parser.add_argument("--cwd", default=None, help="optional default workspace root")
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--timeout", type=float, default=60)
@@ -302,23 +303,31 @@ def _connection_args(args: argparse.Namespace, spec: ConnectionSpec) -> argparse
     connection_args.machine_id = spec.machine_id
     connection_args.token = spec.token
     connection_args.cwd = spec.cwd
+    connection_args.default_workspace_cwd = spec.default_workspace_cwd
     connection_args.connection_spec = spec
     connection_args.registration_only = registration_only
     return connection_args
 
 
-def _spec_from_saved(connector: SavedConnector, *, cwd: str) -> ConnectionSpec:
+def _spec_from_saved(
+    connector: SavedConnector,
+    *,
+    cwd: str,
+    default_workspace_cwd: str | None,
+) -> ConnectionSpec:
     return ConnectionSpec(
         server=connector.server,
         machine_id=connector.machine_id,
         token=connector.token,
         cwd=cwd,
         provider=connector.provider,
+        default_workspace_cwd=default_workspace_cwd,
     )
 
 
 def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
     cwd = connector_cwd(args)
+    default_workspace_cwd = cwd if args.cwd else None
     machine_id = args.machine_id
     token = args.token
     if token and not machine_id:
@@ -338,6 +347,7 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
                 machine_id=machine_id,
                 token=token,
                 cwd=cwd,
+                default_workspace_cwd=default_workspace_cwd,
             )
         ]
     if token:
@@ -346,7 +356,14 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
     saved_connectors = load_saved_connectors(server_url=args.server, cwd=cwd)
     if not saved_connectors:
         raise ConnectorError("missing connector token. Run the web-generated registration command once.")
-    return [_spec_from_saved(connector, cwd=cwd) for connector in saved_connectors]
+    return [
+        _spec_from_saved(
+            connector,
+            cwd=cwd,
+            default_workspace_cwd=default_workspace_cwd,
+        )
+        for connector in saved_connectors
+    ]
 
 
 async def resolve_connection_args(args: argparse.Namespace) -> tuple[str, str, str]:
@@ -532,6 +549,10 @@ async def run_claude_provider_session(
     outbound: asyncio.Queue[JsonDict] = asyncio.Queue()
     provider = ClaudeAgentSdkProvider(
         cwd=connector_cwd,
+        default_cwd=getattr(args, "default_workspace_cwd", None),
+        exclude_history_cwds=()
+        if getattr(args, "default_workspace_cwd", None)
+        else (connector_cwd,),
         model=args.model,
         approval_timeout_seconds=args.approval_timeout,
     )
@@ -557,8 +578,15 @@ async def run_claude_provider_session(
             file=sys.stderr,
         )
         return
-    await websocket.send(json.dumps(workspace_report(connector_cwd), separators=(",", ":")))
-    await websocket.send(json.dumps(provider.thread_sync_report(), separators=(",", ":")))
+    thread_sync = provider.thread_sync_report()
+    if thread_sync.get("workspaces"):
+        await websocket.send(
+            json.dumps(
+                {"type": "workspace.report", "workspaces": thread_sync["workspaces"]},
+                separators=(",", ":"),
+            )
+        )
+    await websocket.send(json.dumps(thread_sync, separators=(",", ":")))
 
     async def outbound_writer() -> None:
         while True:

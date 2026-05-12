@@ -231,12 +231,12 @@ def _record_cwd(record: JsonDict) -> str | None:
     return _string(record.get("cwd") or message.get("cwd"))
 
 
-def _records_cwd(records: list[JsonDict], *, fallback: str) -> str:
+def _records_cwd(records: list[JsonDict]) -> str | None:
     for record in records:
         cwd = _record_cwd(record)
         if cwd:
             return cwd
-    return fallback
+    return None
 
 
 def _find_transcript_file(
@@ -514,10 +514,18 @@ class ClaudeAgentSdkProvider:
         self,
         *,
         cwd: str,
+        default_cwd: str | None = None,
+        exclude_history_cwds: list[str] | tuple[str, ...] = (),
         model: str | None = None,
         approval_timeout_seconds: float = 900,
     ) -> None:
         self.cwd = cwd
+        self.default_cwd = default_cwd
+        self._history_excluded_cwds = {
+            str(Path(item).expanduser().resolve())
+            for item in exclude_history_cwds
+            if item
+        }
         self.model = model
         self.approval_timeout_seconds = approval_timeout_seconds
         self._sdk: Any | None = None
@@ -554,11 +562,13 @@ class ClaudeAgentSdkProvider:
         self._sdk_types = None
 
     def thread_sync_report(self, *, limit: int = _SESSION_SYNC_LIMIT) -> JsonDict:
+        threads = self._list_history_threads(limit=limit)
         return {
             "type": "thread.sync",
             "provider": self.name,
-            "threads": self._list_history_threads(limit=limit),
-            "workspaces": [],
+            "threads": threads,
+            "workspaces": self._workspaces_from_threads(threads),
+            "authoritative": bool(threads),
         }
 
     def read_thread_history(self, request: JsonDict) -> JsonDict:
@@ -628,12 +638,16 @@ class ClaudeAgentSdkProvider:
             )
             if not session_id:
                 continue
-            turns = self._load_history_turns(session_id=session_id)
+            messages = self._load_messages_from_sdk(session_id)
+            if not messages:
+                messages = self._load_messages_from_transcript(session_id)
+            turns = _messages_to_history_turns(session_id=session_id, messages=messages)
             if not turns:
                 continue
             thread = self._thread_from_session_info(
                 session_info,
                 first_user_text=_first_user_message_from_turns(turns),
+                cwd=_records_cwd(messages),
             )
             if thread is not None:
                 threads.append(thread)
@@ -658,6 +672,9 @@ class ClaudeAgentSdkProvider:
             if not turns:
                 continue
             first_user = _first_user_message_from_turns(turns)
+            cwd = _records_cwd(records)
+            if not cwd:
+                continue
             created_at = next(
                 (
                     _timestamp_seconds(record.get("timestamp"))
@@ -666,16 +683,16 @@ class ClaudeAgentSdkProvider:
                 ),
                 None,
             )
-            threads.append(
-                self._history_thread(
-                    session_id=session_id,
-                    title=first_user or f"Claude session {session_id[:8]}",
-                    preview=first_user,
-                    cwd=_records_cwd(records, fallback=self.cwd),
-                    created_at=created_at,
-                    updated_at=_path_mtime(path),
-                )
+            thread = self._history_thread(
+                session_id=session_id,
+                title=first_user or f"Claude session {session_id[:8]}",
+                preview=first_user,
+                cwd=cwd,
+                created_at=created_at,
+                updated_at=_path_mtime(path),
             )
+            if thread is not None:
+                threads.append(thread)
         return threads
 
     def _thread_from_session_info(
@@ -683,6 +700,7 @@ class ClaudeAgentSdkProvider:
         info: JsonDict,
         *,
         first_user_text: str | None = None,
+        cwd: str | None = None,
     ) -> JsonDict | None:
         session_id = _string(
             info.get("session_id") or info.get("sessionId") or info.get("id")
@@ -702,7 +720,9 @@ class ClaudeAgentSdkProvider:
             title = first_user_text
         if preview and preview.lstrip().startswith("/") and first_user_text:
             preview = first_user_text
-        cwd = _string(info.get("cwd")) or self.cwd
+        cwd = _string(info.get("cwd")) or cwd
+        if not cwd:
+            return None
         return self._history_thread(
             session_id=session_id,
             title=title or f"Claude session {session_id[:8]}",
@@ -723,8 +743,10 @@ class ClaudeAgentSdkProvider:
         created_at: int | None,
         updated_at: int | None,
         current_branch: str | None = None,
-    ) -> JsonDict:
-        path = str(Path(cwd or self.cwd).expanduser().resolve())
+    ) -> JsonDict | None:
+        path = str(Path(cwd).expanduser().resolve())
+        if path in self._history_excluded_cwds:
+            return None
         return {
             "id": session_id,
             "app_server_thread_id": session_id,
@@ -739,6 +761,24 @@ class ClaudeAgentSdkProvider:
             "created_at": created_at,
             "updated_at": updated_at,
         }
+
+    def _workspaces_from_threads(self, threads: list[JsonDict]) -> list[JsonDict]:
+        workspaces: list[JsonDict] = []
+        seen: set[str] = set()
+        for thread in threads:
+            remote_path = _string(thread.get("remote_path"))
+            if not remote_path or remote_path in seen:
+                continue
+            seen.add(remote_path)
+            workspaces.append(
+                {
+                    "name": thread.get("workspace_name") or Path(remote_path).name or remote_path,
+                    "path": remote_path,
+                    "remote_path": remote_path,
+                    "current_branch": thread.get("current_branch"),
+                }
+            )
+        return workspaces
 
     def _load_history_turns(self, *, session_id: str | None) -> list[JsonDict]:
         if not session_id:
@@ -809,8 +849,18 @@ class ClaudeAgentSdkProvider:
         cancel_event = asyncio.Event()
         self._cancel_events[turn_id] = cancel_event
         queue: asyncio.Queue[ProviderEnvelope | None] = asyncio.Queue()
+        try:
+            cwd = self._cwd_for_request(request)
+        except ValueError as err:
+            yield self._turn_failed(
+                request,
+                code="invalid_request",
+                message=str(err),
+            )
+            return
         options = self._build_options(
             request,
+            cwd=cwd,
             can_use_tool=self._build_permission_handler(request, queue),
         )
 
@@ -819,7 +869,7 @@ class ClaudeAgentSdkProvider:
             request,
             {
                 "provider": self.name,
-                "cwd": str(self._cwd_for_request(request)),
+                "cwd": str(cwd),
             },
         )
 
@@ -952,10 +1002,10 @@ class ClaudeAgentSdkProvider:
         self,
         request: JsonDict,
         *,
+        cwd: Path,
         can_use_tool: Callable[[str, JsonDict, Any], Any] | None,
     ) -> Any:
         assert self._sdk is not None
-        cwd = self._cwd_for_request(request)
         model = _string(_payload_value(request, "model")) or self.model
         reasoning_effort = _string(_payload_value(request, "reasoning_effort"))
         provider_session_id = _string(_payload_value(request, "provider_session_id"))
@@ -1317,7 +1367,26 @@ class ClaudeAgentSdkProvider:
         )
 
     def _cwd_for_request(self, request: JsonDict) -> Path:
-        return Path(_string(_payload_value(request, "cwd")) or self.cwd).expanduser().resolve()
+        explicit_cwd = _string(_payload_value(request, "cwd"))
+        if explicit_cwd:
+            return Path(explicit_cwd).expanduser().resolve()
+        session_id = (
+            _string(_payload_value(request, "provider_session_id"))
+            or _string(_payload_value(request, "provider_thread_id"))
+        )
+        if session_id:
+            session_cwd = self._cwd_for_session(session_id)
+            if session_cwd:
+                return Path(session_cwd).expanduser().resolve()
+        if self.default_cwd:
+            return Path(self.default_cwd).expanduser().resolve()
+        raise ValueError("Claude Code turns require a workspace cwd")
+
+    def _cwd_for_session(self, session_id: str) -> str | None:
+        messages = self._load_messages_from_sdk(session_id)
+        if not messages:
+            messages = self._load_messages_from_transcript(session_id)
+        return _records_cwd(messages)
 
     @staticmethod
     def _error_code(err: Exception) -> str:

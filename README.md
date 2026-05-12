@@ -26,8 +26,8 @@ Install Claude support when needed:
 python3 -m pip install -e '.[claude]'
 ```
 
-Run the generated registration command from the workspace you want the agent to
-use:
+Run the generated registration command once from the directory where you want
+to keep the connector token file:
 
 ```bash
 botsdock-agent-connector --machine-id mach_xxx --token token_xxx
@@ -48,6 +48,11 @@ botsdock-agent-connector
 Pass `--machine-id <id>` without `--token` when you want to debug just one saved
 machine connection.
 
+For Claude Code, the connector start directory is not treated as a project.
+Historical projects come from Claude Code's own session index, and new turns
+should receive an explicit workspace `cwd` from BotsDock. `--cwd <path>` is only
+an optional fallback default for debugging or one-off local setups.
+
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude
 Agent SDK session APIs, then falls back to local transcript JSONL files under
@@ -59,6 +64,9 @@ Sessions with no real user turn are skipped. History sync lists Claude sessions
 across local projects, while JSONL fallback scans only top-level project
 transcripts and skips subagent transcript noise.
 Live turns started through BotsDock remain the source of truth for new events.
+When a Claude history snapshot is non-empty, it is authoritative for that
+machine, so stale Claude workspaces from older connector behavior can be pruned
+by the backend.
 
 ## Protocol
 
