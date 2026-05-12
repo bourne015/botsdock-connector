@@ -275,6 +275,12 @@ class ClaudeCodeConnector:
         payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
         if msg_type == "app_server.turn_start":
             turn_id = str(payload.get("turn_id") or request_id)
+            print(
+                "agent connector claude turn start: "
+                f"thread={payload.get('thread_id')} turn={turn_id} "
+                f"cwd={payload.get('cwd')} session={payload.get('provider_session_id')}",
+                file=sys.stderr,
+            )
             task = asyncio.create_task(self._run_turn(payload, request_id=request_id))
             self._turn_tasks[turn_id] = task
             task.add_done_callback(lambda done, key=turn_id: self._turn_tasks.pop(key, None))
@@ -342,6 +348,22 @@ class ClaudeCodeConnector:
 
     async def _run_turn(self, request: JsonDict, *, request_id: str | None) -> None:
         async for envelope in self.provider.start_turn(request):
+            if envelope.type in {"turn.completed", "turn.failed", "turn.cancelled"}:
+                payload = envelope.payload or {}
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    error_text = error.get("message") or error.get("code")
+                else:
+                    error_text = error
+                result = payload.get("result")
+                summary = error_text or result or payload.get("status")
+                print(
+                    "agent connector claude turn terminal: "
+                    f"type={envelope.type} thread={request.get('thread_id')} "
+                    f"turn={request.get('turn_id')} session={payload.get('provider_session_id')} "
+                    f"summary={str(summary or '')[:240]}",
+                    file=sys.stderr,
+                )
             await self.outbound.put(
                 envelope_to_backend_message(
                     envelope,
