@@ -11,6 +11,7 @@ from agent_connector.cli import (
     ClaudeCodeConnector,
     ConnectionSpec,
     _connection_args,
+    build_parser,
     envelope_to_backend_message,
     load_env_file,
     provider_hello,
@@ -164,6 +165,30 @@ def test_reconnect_command_does_not_include_provider() -> None:
 
     assert command == "botsdock-agent-connector"
     assert "--provider" not in command
+
+
+def test_parser_defaults_to_claude_cli_on_path() -> None:
+    import shutil
+
+    previous = {
+        "BOTSDOCK_CLAUDE_BIN": os.environ.get("BOTSDOCK_CLAUDE_BIN"),
+        "CLAUDE_CODE_BIN": os.environ.get("CLAUDE_CODE_BIN"),
+    }
+    original_which = shutil.which
+    for key in previous:
+        os.environ.pop(key, None)
+    shutil.which = lambda command: "/tmp/claude" if command == "claude" else None  # type: ignore[assignment]
+    try:
+        args = build_parser().parse_args([])
+    finally:
+        shutil.which = original_which  # type: ignore[assignment]
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert args.claude_bin == "/tmp/claude"
 
 
 def test_saved_connectors_can_be_loaded_together() -> None:

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import random
+import shutil
 import shlex
 import socket
 import sys
@@ -91,8 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-bin",
         default=os.environ.get("BOTSDOCK_CLAUDE_BIN")
-        or os.environ.get("CLAUDE_CODE_BIN"),
-        help="Claude Code CLI path. Defaults to BOTSDOCK_CLAUDE_BIN or CLAUDE_CODE_BIN; otherwise the Agent SDK chooses its bundled CLI.",
+        or os.environ.get("CLAUDE_CODE_BIN")
+        or shutil.which("claude"),
+        help="Claude Code CLI path. Defaults to BOTSDOCK_CLAUDE_BIN, CLAUDE_CODE_BIN, or the claude binary on PATH; otherwise the Agent SDK chooses its bundled CLI.",
     )
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--open-timeout", type=float, default=60)
@@ -745,6 +747,11 @@ async def run_claude_provider_session(
     if profile_env:
         print(
             f"agent connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
+            file=sys.stderr,
+        )
+    if getattr(args, "claude_bin", None):
+        print(
+            f"agent connector using Claude CLI: {args.claude_bin}",
             file=sys.stderr,
         )
     provider = ClaudeAgentSdkProvider(
