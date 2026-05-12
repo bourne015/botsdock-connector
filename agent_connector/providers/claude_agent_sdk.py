@@ -151,7 +151,6 @@ def _transcript_search_roots(cwd: str) -> list[Path]:
             roots.extend(Path(part).expanduser() for part in value.split(os.pathsep) if part)
     home_projects = Path.home() / ".claude" / "projects"
     roots.append(home_projects / _encoded_claude_cwd(cwd))
-    roots.append(home_projects)
     return roots
 
 
@@ -163,8 +162,7 @@ def _candidate_transcript_files(cwd: str, *, limit: int = _TRANSCRIPT_SCAN_LIMIT
             if root.is_file() and root.suffix == ".jsonl":
                 candidates = [root]
             elif root.is_dir():
-                pattern = "*.jsonl" if root.parent.name == "projects" else "**/*.jsonl"
-                candidates = list(root.glob(pattern))
+                candidates = list(root.glob("*.jsonl"))
             else:
                 candidates = []
         except OSError:
@@ -423,7 +421,23 @@ def _messages_to_history_turns(
                     pending_commands[str(item["id"])] = item
             if timestamp:
                 current["completedAt"] = timestamp
-    return [turn for turn in turns if turn.get("items")]
+    return [
+        turn
+        for turn in turns
+        if turn.get("items")
+        and any(
+            isinstance(item, dict) and item.get("type") == "userMessage"
+            for item in turn.get("items", [])
+        )
+    ]
+
+
+def _first_user_message_from_turns(turns: list[JsonDict]) -> str | None:
+    for turn in turns:
+        for item in turn.get("items", []):
+            if isinstance(item, dict) and item.get("type") == "userMessage":
+                return _clean_transcript_text(item.get("content"))
+    return None
 
 
 def _page_turns(turns: list[JsonDict], *, limit: int, cursor: Any) -> tuple[list[JsonDict], str | None]:
@@ -569,7 +583,21 @@ class ClaudeAgentSdkProvider:
             return []
         threads: list[JsonDict] = []
         for session in sessions or []:
-            thread = self._thread_from_session_info(_jsonable(session))
+            session_info = _jsonable(session)
+            session_id = _string(
+                session_info.get("session_id")
+                or session_info.get("sessionId")
+                or session_info.get("id")
+            )
+            if not session_id:
+                continue
+            turns = self._load_history_turns(session_id=session_id)
+            if not turns:
+                continue
+            thread = self._thread_from_session_info(
+                session_info,
+                first_user_text=_first_user_message_from_turns(turns),
+            )
             if thread is not None:
                 threads.append(thread)
         return threads
@@ -588,15 +616,7 @@ class ClaudeAgentSdkProvider:
             turns = _messages_to_history_turns(session_id=session_id, messages=records)
             if not turns:
                 continue
-            first_user = next(
-                (
-                    _string(item.get("content"))
-                    for turn in turns
-                    for item in turn.get("items", [])
-                    if isinstance(item, dict) and item.get("type") == "userMessage"
-                ),
-                None,
-            )
+            first_user = _first_user_message_from_turns(turns)
             created_at = next(
                 (
                     _timestamp_seconds(record.get("timestamp"))
@@ -617,7 +637,12 @@ class ClaudeAgentSdkProvider:
             )
         return threads
 
-    def _thread_from_session_info(self, info: JsonDict) -> JsonDict | None:
+    def _thread_from_session_info(
+        self,
+        info: JsonDict,
+        *,
+        first_user_text: str | None = None,
+    ) -> JsonDict | None:
         session_id = _string(
             info.get("session_id") or info.get("sessionId") or info.get("id")
         )
@@ -632,6 +657,10 @@ class ClaudeAgentSdkProvider:
         )
         title = _clean_transcript_text(title)
         preview = _clean_transcript_text(info.get("first_prompt") or info.get("firstPrompt"))
+        if title and title.lstrip().startswith("/") and first_user_text:
+            title = first_user_text
+        if preview and preview.lstrip().startswith("/") and first_user_text:
+            preview = first_user_text
         cwd = _string(info.get("cwd")) or self.cwd
         return self._history_thread(
             session_id=session_id,

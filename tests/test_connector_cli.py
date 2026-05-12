@@ -283,6 +283,36 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
             ),
             encoding="utf-8",
         )
+        subagent_dir = Path(tmp) / "session_1" / "subagents"
+        subagent_dir.mkdir(parents=True)
+        (subagent_dir / "agent-noise.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "uuid": "subagent_noise_1",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "sessionId": "subagent_noise",
+                    "message": {"role": "user", "content": "subagent noise"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assistant_only = Path(tmp) / "assistant_only.jsonl"
+        assistant_only.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "assistant_only_1",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "sessionId": "assistant_only",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "No response requested."}],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         previous = os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR")
         os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = tmp
         try:
@@ -320,6 +350,7 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
     }
     assert "session_1" in synced_sessions
     assert "session_local" not in synced_sessions
+    assert "assistant_only" not in synced_sessions
     assert history_response["status"] == "ok"
     assert history_response["payload"]["type"] == "thread.history"
     assert len(history_response["payload"]["turns"]) == 1
