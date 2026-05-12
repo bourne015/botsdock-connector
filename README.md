@@ -55,8 +55,9 @@ Claude Code's project history directory. Imported history is converted to the
 same `thread.sync` and `thread.history` shapes used by the rest of BotsDock.
 Claude transcript records that only describe local slash commands, such as
 `<local-command-caveat>` or `<local-command-stdout>`, are filtered before sync.
-Sessions with no real user turn are skipped, and JSONL fallback scans only the
-Claude project directory for the connector workspace rather than every project.
+Sessions with no real user turn are skipped. History sync lists Claude sessions
+across local projects, while JSONL fallback scans only top-level project
+transcripts and skips subagent transcript noise.
 Live turns started through BotsDock remain the source of truth for new events.
 
 ## Protocol

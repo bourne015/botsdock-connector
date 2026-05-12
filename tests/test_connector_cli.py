@@ -254,6 +254,35 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
             ),
             encoding="utf-8",
         )
+        other_project = Path(tmp) / "other_project"
+        other_project.mkdir()
+        (other_project / "session_2.jsonl").write_text(
+            "\n".join(
+                json.dumps(item)
+                for item in [
+                    {
+                        "type": "user",
+                        "uuid": "user_2",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "sessionId": "session_2",
+                        "cwd": "/tmp/other-project",
+                        "message": {"role": "user", "content": "second project"},
+                    },
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant_2",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "sessionId": "session_2",
+                        "cwd": "/tmp/other-project",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "second reply"}],
+                        },
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
         local_only = Path(tmp) / "session_local.jsonl"
         local_only.write_text(
             "\n".join(
@@ -314,10 +343,14 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
             encoding="utf-8",
         )
         previous = os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR")
-        os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = tmp
+        os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = os.pathsep.join(
+            [tmp, str(other_project)]
+        )
         try:
             async def run() -> tuple[dict, dict]:
                 provider = ClaudeAgentSdkProvider(cwd=tmp)
+                provider._list_threads_from_sdk = lambda *, limit: []  # type: ignore[method-assign]
+                provider._load_messages_from_sdk = lambda session_id: []  # type: ignore[method-assign]
                 connector = ClaudeCodeConnector(provider=provider, outbound=asyncio.Queue())
                 sync_response = await connector.handle_backend_message(
                     {"type": "connector.sync_snapshot", "request_id": "req_sync"}
@@ -349,8 +382,15 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
         item["provider_session_id"] for item in sync_response["payload"]["threads"]
     }
     assert "session_1" in synced_sessions
+    assert "session_2" in synced_sessions
     assert "session_local" not in synced_sessions
     assert "assistant_only" not in synced_sessions
+    session_2 = next(
+        item
+        for item in sync_response["payload"]["threads"]
+        if item["provider_session_id"] == "session_2"
+    )
+    assert session_2["remote_path"] == str(Path("/tmp/other-project").resolve())
     assert history_response["status"] == "ok"
     assert history_response["payload"]["type"] == "thread.history"
     assert len(history_response["payload"]["turns"]) == 1
