@@ -22,6 +22,7 @@ from agent_connector.cli import (
 from agent_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkProvider,
     ClaudeAgentSdkRuntimeMissing,
+    _approval_decision_allows,
 )
 from agent_connector.providers.codex_app_server import AppServerProcessClient
 from agent_connector.token_store import (
@@ -203,6 +204,15 @@ def test_claude_approval_envelope_opens_submit_ready_request() -> None:
         "decline",
         "cancel",
     ]
+
+
+def test_claude_approval_accept_decisions_are_allowed() -> None:
+    assert _approval_decision_allows({"decision": "accept"}) is True
+    assert _approval_decision_allows({"decision": "acceptForSession"}) is True
+    assert _approval_decision_allows({"app_server_decision": {"accept": {}}}) is True
+    assert _approval_decision_allows({"response": {"decision": "accept"}}) is True
+    assert _approval_decision_allows({"decision": "decline"}) is False
+    assert _approval_decision_allows({"response": {"decision": "cancel"}}) is False
 
 
 def test_reconnect_command_does_not_include_provider() -> None:

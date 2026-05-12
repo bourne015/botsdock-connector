@@ -71,6 +71,19 @@ _GATEWAY_AUTH_ENV_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
 }
+_APPROVAL_ALLOW_DECISIONS = {
+    "accept",
+    "accepted",
+    "acceptforsession",
+    "acceptwithexecpolicyamendment",
+    "all",
+    "allow",
+    "allowed",
+    "approve",
+    "approved",
+    "applynetworkpolicyamendment",
+    "yes",
+}
 
 
 class ClaudeAgentSdkRuntimeMissing(RuntimeError):
@@ -123,19 +136,33 @@ def _fingerprint(tool_name: str, input_data: JsonDict) -> str:
 def _approval_decision_allows(response: JsonDict | None) -> bool:
     if not isinstance(response, dict):
         return False
-    decision = str(response.get("decision") or response.get("status") or "").lower()
-    if decision in {"approved", "approve", "allow", "allowed", "yes"}:
-        return True
-    app_server_decision = response.get("app_server_decision")
-    if isinstance(app_server_decision, dict):
-        decision = str(
-            app_server_decision.get("decision")
-            or app_server_decision.get("status")
-            or app_server_decision.get("behavior")
-            or ""
-        ).lower()
-        return decision in {"approved", "approve", "allow", "allowed", "yes"}
-    return False
+
+    def decision_name(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict) and value:
+            for key in ("decision", "status", "behavior"):
+                nested = value.get(key)
+                if nested is not None:
+                    return decision_name(nested)
+            return str(next(iter(value.keys())))
+        return ""
+
+    def normalized(value: Any) -> str:
+        return decision_name(value).strip().lower().replace("-", "").replace("_", "")
+
+    candidates = [
+        response.get("decision"),
+        response.get("status"),
+        response.get("behavior"),
+        response.get("app_server_decision"),
+        response.get("response"),
+        response.get("app_server_response"),
+    ]
+    return any(
+        normalized(candidate) in _APPROVAL_ALLOW_DECISIONS
+        for candidate in candidates
+    )
 
 
 def _timestamp_seconds(value: Any) -> int | None:
