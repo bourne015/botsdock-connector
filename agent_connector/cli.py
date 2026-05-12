@@ -229,6 +229,19 @@ class ClaudeCodeConnector:
             )
         if msg_type == "connector.sync_snapshot":
             return ok_response(request_id, empty_thread_sync_report())
+        if msg_type == "connector.thread_history":
+            return ok_response(
+                request_id,
+                {
+                    "type": "thread.history",
+                    "provider": self.provider.name,
+                    "thread_id": payload.get("thread_id"),
+                    "turns": [],
+                    "has_more_before": False,
+                    "next_cursor": None,
+                    "direction": payload.get("direction") or "latest",
+                },
+            )
         if msg_type == "app_server.account_snapshot":
             return ok_response(
                 request_id,
@@ -293,11 +306,13 @@ def connector_cwd(args: argparse.Namespace) -> str:
 
 def _connection_args(args: argparse.Namespace, spec: ConnectionSpec) -> argparse.Namespace:
     connection_args = argparse.Namespace(**vars(args))
+    registration_only = bool(getattr(args, "token", None))
     connection_args.server = spec.server
     connection_args.machine_id = spec.machine_id
     connection_args.token = spec.token
     connection_args.cwd = spec.cwd
     connection_args.connection_spec = spec
+    connection_args.registration_only = registration_only
     return connection_args
 
 
@@ -545,8 +560,13 @@ async def run_claude_provider_session(
         f"agent connector accepted: provider=claude_code machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
         file=sys.stderr,
     )
+    if getattr(args, "registration_only", False):
+        print(
+            "agent connector registration saved; run `botsdock-agent-connector` to start all saved connections",
+            file=sys.stderr,
+        )
+        return
     await websocket.send(json.dumps(workspace_report(connector_cwd), separators=(",", ":")))
-    await websocket.send(json.dumps(empty_thread_sync_report(), separators=(",", ":")))
 
     async def outbound_writer() -> None:
         while True:
@@ -631,6 +651,12 @@ async def run_codex_provider_session(
             f"agent connector accepted: provider=codex machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
             file=sys.stderr,
         )
+        if getattr(args, "registration_only", False):
+            print(
+                "agent connector registration saved; run `botsdock-agent-connector` to start all saved connections",
+                file=sys.stderr,
+            )
+            return
         thread_sync = connector.thread_sync_report()
         if thread_sync.get("workspaces"):
             await websocket.send(
@@ -700,6 +726,9 @@ def is_non_retriable_connector_error(exc: Exception) -> bool:
 
 async def run_connector(args: argparse.Namespace) -> None:
     specs = resolve_connection_specs(args)
+    if args.token:
+        await run_connector_once_for_spec(args, specs[0])
+        return
     if len(specs) == 1 and (args.machine_id or args.token):
         await run_connection(args, specs[0], supervised=False)
         return

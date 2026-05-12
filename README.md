@@ -37,8 +37,9 @@ botsdock-agent-connector --machine-id mach_xxx --token token_xxx
 only for staging, self-hosted, or local debugging environments.
 
 After each successful registration, the connector token is saved in
-`.botsdock_agent_connector.json`. A plain connector start supervises every saved
-machine connection in one process, so Codex and Claude Code can run side by side:
+`.botsdock_agent_connector.json`, and the registration command exits. A plain
+connector start supervises every saved machine connection in one process, so
+Codex and Claude Code can run side by side:
 
 ```bash
 botsdock-agent-connector
@@ -46,6 +47,10 @@ botsdock-agent-connector
 
 Pass `--machine-id <id>` without `--token` when you want to debug just one saved
 machine connection.
+
+Claude Code does not currently expose a Codex-style thread history listing API
+through the SDK. The connector returns an empty history page for explicit history
+requests; live turns started through BotsDock are still persisted by Codex Web.
 
 ## Protocol
 

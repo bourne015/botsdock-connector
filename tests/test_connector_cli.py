@@ -5,6 +5,9 @@ import tempfile
 from dataclasses import dataclass
 
 from agent_connector.cli import (
+    ClaudeCodeConnector,
+    ConnectionSpec,
+    _connection_args,
     envelope_to_backend_message,
     provider_hello,
     reconnect_command,
@@ -155,6 +158,50 @@ def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
         ("mach_claude", "claude_code"),
         ("mach_codex", "codex"),
     ]
+
+
+def test_registration_connection_args_exit_after_token_exchange() -> None:
+    class Args:
+        server = DEFAULT_SERVER
+        machine_id = "mach_new"
+        token = "registration_token"
+        cwd = "."
+
+    spec = ConnectionSpec(
+        server=DEFAULT_SERVER,
+        machine_id="mach_new",
+        token="registration_token",
+        cwd=".",
+    )
+
+    connection_args = _connection_args(Args(), spec)
+
+    assert connection_args.registration_only is True
+
+
+def test_claude_thread_history_returns_empty_history_shape() -> None:
+    async def run() -> dict:
+        provider = ClaudeAgentSdkProvider(cwd=".")
+        connector = ClaudeCodeConnector(provider=provider, outbound=asyncio.Queue())
+        response = await connector.handle_backend_message(
+            {
+                "type": "connector.thread_history",
+                "request_id": "req_1",
+                "payload": {
+                    "thread_id": "thread_1",
+                    "direction": "latest",
+                },
+            }
+        )
+        assert response is not None
+        return response
+
+    response = asyncio.run(run())
+
+    assert response["status"] == "ok"
+    assert response["payload"]["type"] == "thread.history"
+    assert response["payload"]["turns"] == []
+    assert response["payload"]["has_more_before"] is False
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:
