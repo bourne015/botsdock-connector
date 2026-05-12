@@ -22,6 +22,8 @@ _AUTO_ALLOW_TOOLS = (
 )
 _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _BASH_TOOL = "Bash"
+_COMMAND_APPROVAL_METHOD = "item/commandExecution/requestApproval"
+_TOOL_APPROVAL_METHOD = "item/permissions/requestApproval"
 _TRANSCRIPT_SCAN_LIMIT = 200
 _SESSION_SYNC_LIMIT = 200
 # Claude Code stores local slash-command caveats/stdout as user-role
@@ -1171,11 +1173,14 @@ class ClaudeAgentSdkProvider:
                 "tool_name": tool_name,
                 "input": _jsonable(input_data),
                 "tool_permission_context": _jsonable(context),
+                "approval_method": _TOOL_APPROVAL_METHOD,
             }
             command = input_data.get("command") if isinstance(input_data, dict) else None
             if isinstance(command, str) and command:
                 payload["command"] = command
+                payload["command_preview"] = command
                 payload["kind"] = "command"
+                payload["approval_method"] = _COMMAND_APPROVAL_METHOD
             await queue.put(self._envelope("approval.requested", request, payload))
             try:
                 response = await asyncio.wait_for(

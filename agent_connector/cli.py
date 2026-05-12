@@ -284,6 +284,64 @@ def envelope_to_backend_message(
     }
 
 
+def approval_envelope_to_request_opened(envelope, request: JsonDict) -> JsonDict | None:
+    payload = dict(envelope.payload or {})
+    app_server_request_id = (
+        payload.get("app_server_request_id")
+        or payload.get("request_id")
+        or payload.get("provider_request_id")
+    )
+    if app_server_request_id is None:
+        return None
+    app_server_request_id = str(app_server_request_id)
+    method = (
+        payload.get("approval_method")
+        or payload.get("method")
+        or "item/commandExecution/requestApproval"
+    )
+    app_server_thread_id = (
+        payload.get("app_server_thread_id")
+        or payload.get("appServerThreadId")
+        or request.get("app_server_thread_id")
+        or request.get("provider_thread_id")
+        or request.get("thread_id")
+    )
+    app_server_turn_id = (
+        payload.get("app_server_turn_id")
+        or payload.get("appServerTurnId")
+        or request.get("app_server_turn_id")
+        or request.get("provider_turn_id")
+        or request.get("turn_id")
+    )
+    if app_server_thread_id is None:
+        return None
+    command = payload.get("command")
+    if isinstance(command, str) and command:
+        payload.setdefault("command_preview", command)
+    payload.setdefault("request_id", app_server_request_id)
+    payload.setdefault("app_server_request_id", app_server_request_id)
+    payload.setdefault("app_server_thread_id", str(app_server_thread_id))
+    if app_server_turn_id is not None:
+        payload.setdefault("app_server_turn_id", str(app_server_turn_id))
+    payload.setdefault("approval_method", method)
+    payload.setdefault("available_decisions", ["accept", "decline", "cancel"])
+    return {
+        "type": "app_server.request_opened",
+        "kind": "approval",
+        "method": method,
+        "thread_id": request.get("thread_id") or payload.get("thread_id"),
+        "turn_id": request.get("turn_id") or payload.get("turn_id"),
+        "app_server_thread_id": str(app_server_thread_id),
+        "app_server_turn_id": str(app_server_turn_id)
+        if app_server_turn_id is not None
+        else None,
+        "app_server_request_id": app_server_request_id,
+        "request_fingerprint": payload.get("request_fingerprint"),
+        "payload": payload,
+        "raw_payload": envelope.raw_event,
+    }
+
+
 class ClaudeCodeConnector:
     def __init__(self, *, provider: ClaudeAgentSdkProvider, outbound: asyncio.Queue[JsonDict]) -> None:
         self.provider = provider
@@ -369,6 +427,18 @@ class ClaudeCodeConnector:
 
     async def _run_turn(self, request: JsonDict, *, request_id: str | None) -> None:
         async for envelope in self.provider.start_turn(request):
+            if envelope.type == "approval.requested":
+                opened = approval_envelope_to_request_opened(envelope, request)
+                if opened is not None:
+                    print(
+                        "agent connector claude approval requested: "
+                        f"thread={request.get('thread_id')} turn={request.get('turn_id')} "
+                        f"request={opened.get('app_server_request_id')} "
+                        f"method={opened.get('method')}",
+                        file=sys.stderr,
+                    )
+                    await self.outbound.put(opened)
+                    continue
             if envelope.type in {"turn.completed", "turn.failed", "turn.cancelled"}:
                 payload = envelope.payload or {}
                 error = payload.get("error")

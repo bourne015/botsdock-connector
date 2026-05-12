@@ -11,6 +11,7 @@ from agent_connector.cli import (
     ClaudeCodeConnector,
     ConnectionSpec,
     _connection_args,
+    approval_envelope_to_request_opened,
     build_parser,
     envelope_to_backend_message,
     load_env_file,
@@ -155,6 +156,53 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     assert message["event_type"] == "assistant.message"
     assert message["payload"]["provider"] == "claude_code"
     assert message["payload"]["provider_event_id"] == "event_1"
+
+
+def test_claude_approval_envelope_opens_submit_ready_request() -> None:
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    envelope = provider._envelope(
+        "approval.requested",
+        {
+            "thread_id": "thread_1",
+            "turn_id": "turn_1",
+            "provider_thread_id": "session_1",
+            "provider_turn_id": "turn_provider_1",
+        },
+        {
+            "request_id": "claude-perm-1",
+            "provider_request_id": "claude-perm-1",
+            "request_fingerprint": "sha256:abc",
+            "kind": "command",
+            "tool_name": "Bash",
+            "command": "df -h /",
+            "approval_method": "item/commandExecution/requestApproval",
+        },
+    )
+
+    opened = approval_envelope_to_request_opened(
+        envelope,
+        {
+            "thread_id": "thread_1",
+            "turn_id": "turn_1",
+            "provider_thread_id": "session_1",
+            "provider_turn_id": "turn_provider_1",
+        },
+    )
+
+    assert opened is not None
+    assert opened["type"] == "app_server.request_opened"
+    assert opened["kind"] == "approval"
+    assert opened["method"] == "item/commandExecution/requestApproval"
+    assert opened["app_server_request_id"] == "claude-perm-1"
+    assert opened["app_server_thread_id"] == "session_1"
+    assert opened["app_server_turn_id"] == "turn_provider_1"
+    assert opened["payload"]["command_preview"] == "df -h /"
+    assert opened["payload"]["request_fingerprint"] == "sha256:abc"
+    assert opened["payload"]["available_decisions"] == [
+        "accept",
+        "decline",
+        "cancel",
+    ]
 
 
 def test_reconnect_command_does_not_include_provider() -> None:
