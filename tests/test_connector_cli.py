@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from dataclasses import dataclass
 
-from agent_connector.cli import envelope_to_backend_message, provider_hello, reconnect_command
+from agent_connector.cli import (
+    envelope_to_backend_message,
+    provider_hello,
+    reconnect_command,
+    resolve_connection_specs,
+)
 from agent_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkProvider,
     ClaudeAgentSdkRuntimeMissing,
 )
 from agent_connector.providers.codex_app_server import AppServerProcessClient
+from agent_connector.token_store import (
+    DEFAULT_SERVER,
+    load_saved_connectors,
+    save_connector_token,
+)
 
 
 @dataclass
@@ -87,6 +98,63 @@ def test_reconnect_command_does_not_include_provider() -> None:
 
     assert command == "botsdock-agent-connector"
     assert "--provider" not in command
+
+
+def test_saved_connectors_can_be_loaded_together() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_codex",
+            token="token_codex",
+            provider="codex",
+            cwd=tmp,
+        )
+        save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_claude",
+            token="token_claude",
+            provider="claude_code",
+            cwd=tmp,
+        )
+
+        connectors = load_saved_connectors(server_url=DEFAULT_SERVER, cwd=tmp)
+
+    assert sorted((item.machine_id, item.token, item.provider) for item in connectors) == [
+        ("mach_claude", "token_claude", "claude_code"),
+        ("mach_codex", "token_codex", "codex"),
+    ]
+
+
+def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
+    class Args:
+        server = DEFAULT_SERVER
+        machine_id = None
+        token = None
+        cwd = ""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        Args.cwd = tmp
+        save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_codex",
+            token="token_codex",
+            provider="codex",
+            cwd=tmp,
+        )
+        save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_claude",
+            token="token_claude",
+            provider="claude_code",
+            cwd=tmp,
+        )
+
+        specs = resolve_connection_specs(Args())
+
+    assert sorted((item.machine_id, item.provider) for item in specs) == [
+        ("mach_claude", "claude_code"),
+        ("mach_codex", "codex"),
+    ]
 
 
 def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:

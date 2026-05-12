@@ -3,8 +3,8 @@
 Provider-neutral connector for BotsDock Agent Workbench.
 
 The connector runs on the user's machine and connects outbound to Codex Web.
-The user does not choose a provider on the command line. The connector first
-bootstraps against the registered machine, Codex Web returns the machine
+The user does not choose a provider on the command line. Each saved machine
+connection first bootstraps against Codex Web, Codex Web returns that machine's
 provider, and the connector starts the matching runtime driver.
 
 Supported providers:
@@ -36,12 +36,16 @@ botsdock-agent-connector --machine-id mach_xxx --token token_xxx
 `https://www.botsdock.cn` is the default backend. Pass `--server <base_url>`
 only for staging, self-hosted, or local debugging environments.
 
-After the first successful connection, the connector token is saved in
-`.botsdock_agent_connector.json`, so reconnecting can be:
+After each successful registration, the connector token is saved in
+`.botsdock_agent_connector.json`. A plain connector start supervises every saved
+machine connection in one process, so Codex and Claude Code can run side by side:
 
 ```bash
 botsdock-agent-connector
 ```
+
+Pass `--machine-id <id>` without `--token` when you want to debug just one saved
+machine connection.
 
 ## Protocol
 

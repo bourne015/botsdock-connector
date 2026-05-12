@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,14 @@ LEGACY_SERVER_URLS = {"https://botsdock.com", "https://www.botsdock.com"}
 
 class ConnectorError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class SavedConnector:
+    server: str
+    machine_id: str
+    token: str
+    provider: str | None = None
 
 
 def backend_ws_url(server_url: str, machine_id: str) -> str:
@@ -93,37 +102,75 @@ def load_connector_token(*, server_url: str, machine_id: str, cwd: str | None = 
     return token if isinstance(token, str) and token else None
 
 
-def load_single_saved_connector(*, server_url: str, cwd: str | None = None) -> tuple[str, str] | None:
+def _connector_from_entry(entry: Any, *, server_url: str | None = None) -> SavedConnector | None:
+    if not isinstance(entry, dict):
+        return None
+    machine_id = entry.get("machine_id")
+    token = entry.get("token")
+    server = entry.get("server") or server_url
+    provider = entry.get("provider")
+    if (
+        isinstance(machine_id, str)
+        and machine_id
+        and isinstance(token, str)
+        and token
+        and isinstance(server, str)
+        and server
+    ):
+        return SavedConnector(
+            server=normalized_server_url(server),
+            machine_id=machine_id,
+            token=token,
+            provider=provider if isinstance(provider, str) and provider else None,
+        )
+    return None
+
+
+def load_saved_connectors(*, server_url: str, cwd: str | None = None) -> list[SavedConnector]:
     path = read_token_store_path(cwd)
     data = load_token_store(path)
     normalized_server = normalized_server_url(server_url)
-    matches: list[tuple[str, str]] = []
+    matches: list[SavedConnector] = []
+    seen: set[tuple[str, str]] = set()
     for entry in data.get("connectors", {}).values():
-        if not isinstance(entry, dict):
+        connector = _connector_from_entry(entry, server_url=normalized_server)
+        if connector is None or connector.server != normalized_server:
             continue
-        if entry.get("server") != normalized_server:
-            continue
-        machine_id = entry.get("machine_id")
-        token = entry.get("token")
-        if isinstance(machine_id, str) and machine_id and isinstance(token, str) and token:
-            matches.append((machine_id, token))
+        key = (connector.server, connector.machine_id)
+        if key not in seen:
+            seen.add(key)
+            matches.append(connector)
     if not matches and normalized_server == DEFAULT_SERVER:
         for entry in data.get("connectors", {}).values():
-            if not isinstance(entry, dict):
+            connector = _connector_from_entry(entry)
+            if connector is None:
                 continue
-            if entry.get("server") not in LEGACY_SERVER_URLS:
+            if connector.server not in LEGACY_SERVER_URLS:
                 continue
-            machine_id = entry.get("machine_id")
-            token = entry.get("token")
-            if isinstance(machine_id, str) and machine_id and isinstance(token, str) and token:
-                matches.append((machine_id, token))
+            connector = SavedConnector(
+                server=normalized_server,
+                machine_id=connector.machine_id,
+                token=connector.token,
+                provider=connector.provider,
+            )
+            key = (connector.server, connector.machine_id)
+            if key not in seen:
+                seen.add(key)
+                matches.append(connector)
+    return matches
+
+
+def load_single_saved_connector(*, server_url: str, cwd: str | None = None) -> tuple[str, str] | None:
+    path = read_token_store_path(cwd)
+    matches = load_saved_connectors(server_url=server_url, cwd=cwd)
     if not matches:
         return None
     if len(matches) > 1:
         raise ConnectorError(
             f"multiple saved connectors found in {path}; pass --machine-id to choose one"
         )
-    return matches[0]
+    connector = matches[0]
+    return connector.machine_id, connector.token
 
 
 def save_connector_token(

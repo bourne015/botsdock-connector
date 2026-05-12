@@ -8,6 +8,7 @@ import random
 import shlex
 import socket
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,10 @@ from .providers.codex_app_server import (
 from .token_store import (
     DEFAULT_SERVER,
     ConnectorError,
+    SavedConnector,
     backend_ws_url,
     load_connector_token,
-    load_single_saved_connector,
+    load_saved_connectors,
     save_connector_token,
 )
 
@@ -32,6 +34,15 @@ from .token_store import (
 JsonDict = dict[str, Any]
 CODEX_AGENT_PROVIDER = "codex"
 CLAUDE_CODE_AGENT_PROVIDER = "claude_code"
+
+
+@dataclass
+class ConnectionSpec:
+    server: str
+    machine_id: str
+    token: str
+    cwd: str
+    provider: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -276,31 +287,181 @@ def reconnect_command(args: argparse.Namespace) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
-async def resolve_connection_args(args: argparse.Namespace) -> tuple[str, str, str]:
-    connector_cwd = str(Path(args.cwd or ".").expanduser().resolve())
+def connector_cwd(args: argparse.Namespace) -> str:
+    return str(Path(args.cwd or ".").expanduser().resolve())
+
+
+def _connection_args(args: argparse.Namespace, spec: ConnectionSpec) -> argparse.Namespace:
+    connection_args = argparse.Namespace(**vars(args))
+    connection_args.server = spec.server
+    connection_args.machine_id = spec.machine_id
+    connection_args.token = spec.token
+    connection_args.cwd = spec.cwd
+    connection_args.connection_spec = spec
+    return connection_args
+
+
+def _spec_from_saved(connector: SavedConnector, *, cwd: str) -> ConnectionSpec:
+    return ConnectionSpec(
+        server=connector.server,
+        machine_id=connector.machine_id,
+        token=connector.token,
+        cwd=cwd,
+        provider=connector.provider,
+    )
+
+
+def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
+    cwd = connector_cwd(args)
     machine_id = args.machine_id
     token = args.token
-    if not token:
-        if machine_id:
+    if token and not machine_id:
+        raise ConnectorError("missing machine-id for registration token connection")
+    if machine_id:
+        if not token:
             token = load_connector_token(
                 server_url=args.server,
                 machine_id=machine_id,
-                cwd=connector_cwd,
+                cwd=cwd,
             )
-        else:
-            saved_connector = load_single_saved_connector(
-                server_url=args.server,
-                cwd=connector_cwd,
+        if not token:
+            raise ConnectorError("missing connector token. Run the web-generated registration command once.")
+        return [
+            ConnectionSpec(
+                server=args.server.rstrip("/"),
+                machine_id=machine_id,
+                token=token,
+                cwd=cwd,
             )
-            if saved_connector is not None:
-                machine_id, token = saved_connector
-    if args.token and not machine_id:
+        ]
+    if token:
         raise ConnectorError("missing machine-id for registration token connection")
-    if not token:
+
+    saved_connectors = load_saved_connectors(server_url=args.server, cwd=cwd)
+    if not saved_connectors:
         raise ConnectorError("missing connector token. Run the web-generated registration command once.")
-    if not machine_id:
-        raise ConnectorError("missing machine-id")
-    return connector_cwd, machine_id, token
+    return [_spec_from_saved(connector, cwd=cwd) for connector in saved_connectors]
+
+
+async def resolve_connection_args(args: argparse.Namespace) -> tuple[str, str, str]:
+    specs = resolve_connection_specs(args)
+    if len(specs) > 1:
+        raise ConnectorError(
+            "multiple saved connectors found; call resolve_connection_specs for supervisor mode"
+        )
+    spec = specs[0]
+    return spec.cwd, spec.machine_id, spec.token
+
+
+def connection_label(spec: ConnectionSpec) -> str:
+    provider = f" provider={spec.provider}" if spec.provider else ""
+    return f"machine={spec.machine_id}{provider}"
+
+
+async def run_connector_once_for_spec(args: argparse.Namespace, spec: ConnectionSpec) -> None:
+    import websockets
+
+    connection_args = _connection_args(args, spec)
+    ws_url = backend_ws_url(spec.server, spec.machine_id)
+    print(
+        f"agent connector connecting: server={spec.server.rstrip('/')} machine={spec.machine_id}",
+        file=sys.stderr,
+    )
+    async with websockets.connect(
+        ws_url,
+        additional_headers={"Authorization": f"Bearer {spec.token}"},
+        open_timeout=connection_args.open_timeout,
+        ping_interval=20,
+        ping_timeout=connection_args.ping_timeout,
+    ) as websocket:
+        bootstrap = await send_bootstrap(websocket, connection_args)
+        provider = bootstrap["provider"]
+        print(
+            f"agent connector selected provider: {provider} machine={spec.machine_id}",
+            file=sys.stderr,
+        )
+        if provider == CODEX_AGENT_PROVIDER:
+            await run_codex_provider_session(
+                websocket=websocket,
+                args=connection_args,
+                connector_cwd=spec.cwd,
+                machine_id=spec.machine_id,
+            )
+            return
+        if provider == CLAUDE_CODE_AGENT_PROVIDER:
+            await run_claude_provider_session(
+                websocket=websocket,
+                args=connection_args,
+                connector_cwd=spec.cwd,
+                machine_id=spec.machine_id,
+            )
+            return
+        raise ConnectorError(f"unsupported machine provider: {provider}")
+
+
+async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supervised: bool) -> None:
+    if not args.reconnect:
+        await run_connector_once_for_spec(args, spec)
+        return
+    attempt = 0
+    while True:
+        try:
+            await run_connector_once_for_spec(args, spec)
+            attempt = 0
+            print(
+                f"agent connector disconnected; reconnecting {connection_label(spec)}",
+                file=sys.stderr,
+            )
+        except KeyboardInterrupt:
+            raise
+        except ConnectorError as exc:
+            if is_non_retriable_connector_error(exc):
+                if supervised:
+                    print(
+                        f"agent connector stopped {connection_label(spec)}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return
+                raise
+            attempt += 1
+            print(
+                f"agent connector connection failed {connection_label(spec)}: {exc}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            attempt += 1
+            print(
+                f"agent connector connection failed {connection_label(spec)}: {exc}",
+                file=sys.stderr,
+            )
+
+        base_delay = max(1.0, float(args.reconnect_initial_delay))
+        max_delay = max(base_delay, float(args.reconnect_max_delay))
+        delay = min(max_delay, base_delay * (2 ** min(attempt, 6)))
+        delay = delay * random.uniform(0.75, 1.25)
+        print(
+            f"agent connector reconnecting {connection_label(spec)} in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        await asyncio.sleep(delay)
+
+
+async def run_supervisor(args: argparse.Namespace, specs: list[ConnectionSpec]) -> None:
+    print(f"agent connector supervising {len(specs)} saved connection(s)", file=sys.stderr)
+    tasks = [
+        asyncio.create_task(
+            run_connection(args, spec, supervised=len(specs) > 1),
+            name=f"agent-connector:{spec.machine_id}",
+        )
+        for spec in specs
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def send_bootstrap(websocket: Any, args: argparse.Namespace) -> JsonDict:
@@ -339,6 +500,11 @@ async def save_accepted_token(
     args.machine_id = machine_id
     args.token = new_connector_token
     provider = accepted.get("provider")
+    spec = getattr(args, "connection_spec", None)
+    if isinstance(spec, ConnectionSpec):
+        spec.token = new_connector_token
+        if isinstance(provider, str) and provider:
+            spec.provider = provider
     token_path = save_connector_token(
         server_url=args.server,
         machine_id=machine_id,
@@ -514,41 +680,10 @@ async def run_codex_provider_session(
 
 
 async def run_connector_once(args: argparse.Namespace) -> None:
-    import websockets
-
-    connector_cwd, machine_id, token = await resolve_connection_args(args)
-    ws_url = backend_ws_url(args.server, machine_id)
-    print(
-        f"agent connector connecting: server={args.server.rstrip('/')} machine={machine_id}",
-        file=sys.stderr,
-    )
-    async with websockets.connect(
-        ws_url,
-        additional_headers={"Authorization": f"Bearer {token}"},
-        open_timeout=args.open_timeout,
-        ping_interval=20,
-        ping_timeout=args.ping_timeout,
-    ) as websocket:
-        bootstrap = await send_bootstrap(websocket, args)
-        provider = bootstrap["provider"]
-        print(f"agent connector selected provider: {provider}", file=sys.stderr)
-        if provider == CODEX_AGENT_PROVIDER:
-            await run_codex_provider_session(
-                websocket=websocket,
-                args=args,
-                connector_cwd=connector_cwd,
-                machine_id=machine_id,
-            )
-            return
-        if provider == CLAUDE_CODE_AGENT_PROVIDER:
-            await run_claude_provider_session(
-                websocket=websocket,
-                args=args,
-                connector_cwd=connector_cwd,
-                machine_id=machine_id,
-            )
-            return
-        raise ConnectorError(f"unsupported machine provider: {provider}")
+    specs = resolve_connection_specs(args)
+    if len(specs) != 1:
+        raise ConnectorError("run_connector_once requires a single connection spec")
+    await run_connector_once_for_spec(args, specs[0])
 
 
 def is_non_retriable_connector_error(exc: Exception) -> bool:
@@ -564,32 +699,11 @@ def is_non_retriable_connector_error(exc: Exception) -> bool:
 
 
 async def run_connector(args: argparse.Namespace) -> None:
-    if not args.reconnect:
-        await run_connector_once(args)
+    specs = resolve_connection_specs(args)
+    if len(specs) == 1 and (args.machine_id or args.token):
+        await run_connection(args, specs[0], supervised=False)
         return
-    attempt = 0
-    while True:
-        try:
-            await run_connector_once(args)
-            attempt = 0
-            print("agent connector disconnected; reconnecting", file=sys.stderr)
-        except KeyboardInterrupt:
-            raise
-        except ConnectorError as exc:
-            if is_non_retriable_connector_error(exc):
-                raise
-            attempt += 1
-            print(f"agent connector connection failed: {exc}", file=sys.stderr)
-        except Exception as exc:
-            attempt += 1
-            print(f"agent connector connection failed: {exc}", file=sys.stderr)
-
-        base_delay = max(1.0, float(args.reconnect_initial_delay))
-        max_delay = max(base_delay, float(args.reconnect_max_delay))
-        delay = min(max_delay, base_delay * (2 ** min(attempt, 6)))
-        delay = delay * random.uniform(0.75, 1.25)
-        print(f"agent connector reconnecting in {delay:.1f}s", file=sys.stderr)
-        await asyncio.sleep(delay)
+    await run_supervisor(args, specs)
 
 
 def main() -> int:
