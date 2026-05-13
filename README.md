@@ -3,9 +3,9 @@
 Provider-neutral connector for BotsDock Agent Workbench.
 
 The connector runs on the user's machine and connects outbound to Codex Web.
-The user does not choose a provider on the command line. Each saved machine
-connection first bootstraps against Codex Web, Codex Web returns that machine's
-provider, and the connector starts the matching runtime driver.
+The user does not choose a provider on the command line. A physical machine is
+registered once, then the connector reports the provider runtimes available on
+that machine over the same WebSocket connection.
 
 Supported providers:
 
@@ -73,8 +73,9 @@ only for staging, self-hosted, or local debugging environments.
 
 After each successful registration, the connector token is saved in
 `.botsdock_connector.json`, and the registration command exits. A plain
-connector start supervises every saved machine connection in one process, so
-Codex and Claude Code can run side by side:
+connector start runs every saved machine connection in one process. For a
+normal physical machine there is one saved connection, and Codex plus Claude
+Code run side by side through that connection:
 
 ```bash
 botsdock-connector
@@ -129,13 +130,13 @@ Claude App/Keychain 登录。
 
 ## Runtime profiles
 
-同一台物理机器可以注册多个 Claude Code machine，并让它们使用不同的本地
-CLI/env/model 配置。BotsDock 不保存 Claude、Anthropic 或第三方网关的登录
-凭据；这些凭据始终留在用户本机，由 connector 在启动对应 provider runtime
-时注入给 Claude Agent SDK。
+同一台物理机器只需要注册一次。Claude Code 的 CLI/env/model 配置属于这台
+机器上的 provider runtime profile。BotsDock 不保存 Claude、Anthropic 或
+第三方网关的登录凭据；这些凭据始终留在用户本机，由 connector 在启动
+Claude Agent SDK runtime 时注入。
 
-默认 profile id 是 `default`。如果需要区分 Claude 官方 CLI 登录、DeepSeek
-网关、公司代理等本地身份，可以在首次注册对应 machine 时指定 profile：
+默认 profile id 是 `default`。如果需要使用 DeepSeek 网关、公司代理等本地
+身份，可以在首次注册或后续运行 connector 时指定 profile：
 
 ```bash
 botsdock-connector \
@@ -153,8 +154,8 @@ botsdock-connector \
 botsdock-connector
 ```
 
-connector 会在一个进程中并发维护所有 saved machine，并为每条连接加载各自
-的 runtime profile。`connector.hello` 只会上报 profile 的非敏感元数据，例如
+connector 会在一个进程中维护所有 saved machine。每条 machine connection
+会加载本地 runtime profile，并通过 `connector.hello` 上报非敏感元数据，例如
 profile id、display name、env key 名称、模型名和 CLI 标签；env 文件内容和
 token 值不会发送到 BotsDock。
 
@@ -188,8 +189,20 @@ The first WebSocket message is provider-neutral:
 Codex Web validates the machine token and returns:
 
 ```json
-{"type":"connector.bootstrap","provider":"codex"}
+{"type":"connector.bootstrap","provider":"agent"}
 ```
 
-The connector then sends the regular `connector.hello` with provider-specific
-capabilities and starts that provider's runtime.
+The connector then sends `connector.hello` with `provider=agent` and a
+`provider_runtimes` array. Codex Web routes workspace/thread/turn/approval
+requests by the provider on each resource.
+
+```json
+{
+  "type": "connector.hello",
+  "provider": "agent",
+  "provider_runtimes": [
+    {"provider": "codex", "runtime": "codex_app_server"},
+    {"provider": "claude_code", "runtime": "claude_agent_sdk"}
+  ]
+}
+```
