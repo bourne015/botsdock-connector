@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_connector.cli import (
+from botsdock_connector.cli import (
     ClaudeCodeConnector,
     ConnectionSpec,
     _connection_args,
@@ -19,16 +19,18 @@ from agent_connector.cli import (
     reconnect_command,
     resolve_connection_specs,
 )
-from agent_connector.providers.claude_agent_sdk import (
+from botsdock_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkProvider,
     ClaudeAgentSdkRuntimeMissing,
     _approval_decision_allows,
 )
-from agent_connector.providers.codex_app_server import AppServerProcessClient
-from agent_connector.token_store import (
+from botsdock_connector.providers.codex_app_server import AppServerProcessClient
+from botsdock_connector.token_store import (
     DEFAULT_SERVER,
+    load_connector_token,
     load_saved_connectors,
     save_connector_token,
+    token_store_key,
 )
 
 
@@ -107,23 +109,23 @@ def test_env_file_parses_local_provider_credentials_without_global_mutation() ->
             "\n".join(
                 [
                     "# local only",
-                    "BOTS_TEST_AGENT_CONNECTOR_ENV=from_file",
-                    "export BOTS_TEST_AGENT_CONNECTOR_EXPORTED='quoted'",
+                    "BOTS_TEST_BOTSDOCK_CONNECTOR_ENV=from_file",
+                    "export BOTS_TEST_BOTSDOCK_CONNECTOR_EXPORTED='quoted'",
                 ]
             ),
             encoding="utf-8",
         )
-        os.environ.pop("BOTS_TEST_AGENT_CONNECTOR_ENV", None)
-        os.environ.pop("BOTS_TEST_AGENT_CONNECTOR_EXPORTED", None)
+        os.environ.pop("BOTS_TEST_BOTSDOCK_CONNECTOR_ENV", None)
+        os.environ.pop("BOTS_TEST_BOTSDOCK_CONNECTOR_EXPORTED", None)
 
         loaded = load_env_file(str(path))
 
         assert loaded == {
-            "BOTS_TEST_AGENT_CONNECTOR_ENV": "from_file",
-            "BOTS_TEST_AGENT_CONNECTOR_EXPORTED": "quoted",
+            "BOTS_TEST_BOTSDOCK_CONNECTOR_ENV": "from_file",
+            "BOTS_TEST_BOTSDOCK_CONNECTOR_EXPORTED": "quoted",
         }
-        assert "BOTS_TEST_AGENT_CONNECTOR_ENV" not in os.environ
-        assert "BOTS_TEST_AGENT_CONNECTOR_EXPORTED" not in os.environ
+        assert "BOTS_TEST_BOTSDOCK_CONNECTOR_ENV" not in os.environ
+        assert "BOTS_TEST_BOTSDOCK_CONNECTOR_EXPORTED" not in os.environ
 
 
 def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
@@ -223,7 +225,7 @@ def test_reconnect_command_does_not_include_provider() -> None:
 
     command = reconnect_command(Args())
 
-    assert command == "botsdock-agent-connector"
+    assert command == "botsdock-connector"
     assert "--provider" not in command
 
 
@@ -287,6 +289,46 @@ def test_saved_connectors_can_be_loaded_together() -> None:
     assert claude.env_file == "/tmp/deepseek.env"
     assert claude.model == "deepseek-chat"
     assert claude.claude_bin == "/usr/local/bin/claude"
+
+
+def test_token_store_uses_new_filename_and_reads_legacy_store() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = save_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_new",
+            token="token_new",
+            provider="codex",
+            cwd=tmp,
+        )
+        assert token_path.name == ".botsdock_connector.json"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        legacy_path = Path(tmp) / ".botsdock_agent_connector.json"
+        legacy_key = token_store_key(DEFAULT_SERVER, "mach_legacy")
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "connectors": {
+                        legacy_key: {
+                            "server": DEFAULT_SERVER,
+                            "machine_id": "mach_legacy",
+                            "provider": "claude_code",
+                            "token": "token_legacy",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = load_connector_token(
+            server_url=DEFAULT_SERVER,
+            machine_id="mach_legacy",
+            cwd=tmp,
+        )
+
+    assert loaded == "token_legacy"
 
 
 def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
@@ -645,7 +687,7 @@ def test_claude_options_use_user_cli_settings_and_env() -> None:
     assert options["cli_path"] == "/usr/local/bin/claude"
     assert options["setting_sources"] == ["user", "project", "local"]
     assert options["env"]["ANTHROPIC_BASE_URL"] == "https://example.test/anthropic"
-    assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-agent-connector"
+    assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-connector"
 
 
 def test_claude_env_auth_token_is_mirrored_for_sdk_resume() -> None:

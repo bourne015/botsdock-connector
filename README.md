@@ -1,4 +1,4 @@
-# BotsDock Agent Connector
+# BotsDock Connector
 
 Provider-neutral connector for BotsDock Agent Workbench.
 
@@ -24,19 +24,19 @@ Run the generated registration command once from the directory where you want
 to keep the connector token file:
 
 ```bash
-botsdock-agent-connector --machine-id mach_xxx --token token_xxx
+botsdock-connector --machine-id mach_xxx --token token_xxx
 ```
 
 `https://www.botsdock.cn` is the default backend. Pass `--server <base_url>`
 only for staging, self-hosted, or local debugging environments.
 
 After each successful registration, the connector token is saved in
-`.botsdock_agent_connector.json`, and the registration command exits. A plain
+`.botsdock_connector.json`, and the registration command exits. A plain
 connector start supervises every saved machine connection in one process, so
 Codex and Claude Code can run side by side:
 
 ```bash
-botsdock-agent-connector
+botsdock-connector
 ```
 
 Pass `--machine-id <id>` without `--token` when you want to debug just one saved
@@ -61,22 +61,22 @@ variables, keep them in a local-only env file instead:
 
 ```bash
 mkdir -p ~/.botsdock
-cat > ~/.botsdock/agent_connector.env <<'EOF'
+cat > ~/.botsdock/botsdock_connector.env <<'EOF'
 ANTHROPIC_BASE_URL=https://your-gateway.example/anthropic
 ANTHROPIC_AUTH_TOKEN=your-local-token
 ANTHROPIC_MODEL=your-model-name
 EOF
-botsdock-agent-connector
+botsdock-connector
 ```
 
 On macOS with zsh, variables in `~/.zprofile` are only loaded for login shells.
-If `botsdock-agent-connector` logs `env_keys` without `ANTHROPIC_BASE_URL` and
+If `botsdock-connector` logs `env_keys` without `ANTHROPIC_BASE_URL` and
 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, either run `source ~/.zprofile`
 before starting the connector, move those exports to `~/.zshrc`, or use the
-dedicated `~/.botsdock/agent_connector.env` file above.
+dedicated `~/.botsdock/botsdock_connector.env` file above.
 
 The env file is read only by the local connector process and is never sent to
-BotsDock. You can also point at another file with `BOTSDOCK_AGENT_ENV_FILE` or
+BotsDock. You can also point at another file with `BOTSDOCK_CONNECTOR_ENV_FILE` or
 `--env-file`.
 
 启动 Claude Code provider 时，connector 会在本地日志里打印 runtime profile
@@ -97,25 +97,29 @@ CLI/env/model 配置。BotsDock 不保存 Claude、Anthropic 或第三方网关�
 网关、公司代理等本地身份，可以在首次注册对应 machine 时指定 profile：
 
 ```bash
-botsdock-agent-connector \
+botsdock-connector \
   --machine-id mach_xxx \
   --token token_xxx \
   --runtime-profile deepseek \
   --runtime-profile-name "DeepSeek" \
-  --env-file ~/.botsdock/agent_connector.deepseek.env
+  --env-file ~/.botsdock/botsdock_connector.deepseek.env
 ```
 
 注册成功后，profile id/name、env 文件路径、模型覆盖和 CLI 路径会写入本地
-`.botsdock_agent_connector.json`。之后直接运行：
+`.botsdock_connector.json`。之后直接运行：
 
 ```bash
-botsdock-agent-connector
+botsdock-connector
 ```
 
 connector 会在一个进程中并发维护所有 saved machine，并为每条连接加载各自
 的 runtime profile。`connector.hello` 只会上报 profile 的非敏感元数据，例如
 profile id、display name、env key 名称、模型名和 CLI 标签；env 文件内容和
 token 值不会发送到 BotsDock。
+
+旧版本生成的 `.botsdock_agent_connector.json`、`.codex_connector.json` 和
+`.botsdock_codex_connector.json` 仍会被读取；新的注册和 token 刷新会写入
+`.botsdock_connector.json`。
 
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude

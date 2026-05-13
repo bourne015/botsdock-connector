@@ -1162,7 +1162,7 @@ class ClaudeAgentSdkProvider:
         return self._sdk.ClaudeAgentOptions(**kwargs)
 
     def _claude_env_overrides(self) -> dict[str, str]:
-        env = {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-agent-connector"}
+        env = {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-connector"}
         for key, value in os.environ.items():
             if _is_runtime_env_key(key):
                 env[key] = value

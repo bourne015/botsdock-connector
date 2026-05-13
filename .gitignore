@@ -3,4 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+.botsdock_connector.json
 .botsdock_agent_connector.json
+.codex_connector.json
+.botsdock_codex_connector.json

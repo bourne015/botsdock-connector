@@ -55,13 +55,22 @@ class ConnectionSpec:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="botsdock-agent-connector",
-        description="Run the BotsDock agent connector",
+        prog="botsdock-connector",
+        description="Run the BotsDock connector",
     )
     parser.add_argument(
         "--server",
-        default=os.environ.get("BOTSDOCK_AGENT_SERVER", os.environ.get("BOTSDOCK_CODEX_SERVER", DEFAULT_SERVER)),
-        help=f"Backend base URL. Defaults to BOTSDOCK_AGENT_SERVER, BOTSDOCK_CODEX_SERVER, or {DEFAULT_SERVER}",
+        default=os.environ.get(
+            "BOTSDOCK_CONNECTOR_SERVER",
+            os.environ.get(
+                "BOTSDOCK_AGENT_SERVER",
+                os.environ.get("BOTSDOCK_CODEX_SERVER", DEFAULT_SERVER),
+            ),
+        ),
+        help=(
+            "Backend base URL. Defaults to BOTSDOCK_CONNECTOR_SERVER, "
+            f"BOTSDOCK_CODEX_SERVER, or {DEFAULT_SERVER}."
+        ),
     )
     parser.add_argument("--machine-id", default=None)
     parser.add_argument(
@@ -72,20 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", default=None, help="optional default workspace root")
     parser.add_argument(
         "--runtime-profile",
-        default=os.environ.get("BOTSDOCK_AGENT_PROFILE")
+        default=os.environ.get("BOTSDOCK_CONNECTOR_PROFILE")
+        or os.environ.get("BOTSDOCK_AGENT_PROFILE")
         or os.environ.get("BOTSDOCK_CLAUDE_PROFILE"),
         help="Local runtime profile id for provider-specific CLI/env settings. Defaults to 'default'.",
     )
     parser.add_argument(
         "--runtime-profile-name",
-        default=os.environ.get("BOTSDOCK_AGENT_PROFILE_NAME")
+        default=os.environ.get("BOTSDOCK_CONNECTOR_PROFILE_NAME")
+        or os.environ.get("BOTSDOCK_AGENT_PROFILE_NAME")
         or os.environ.get("BOTSDOCK_CLAUDE_PROFILE_NAME"),
         help="Optional display name for the local runtime profile.",
     )
     parser.add_argument(
         "--env-file",
-        default=os.environ.get("BOTSDOCK_AGENT_ENV_FILE"),
-        help="Local env file for provider credentials. Defaults to a profile-specific ~/.botsdock/agent_connector.<profile>.env or ~/.botsdock/agent_connector.env when present.",
+        default=os.environ.get("BOTSDOCK_CONNECTOR_ENV_FILE")
+        or os.environ.get("BOTSDOCK_AGENT_ENV_FILE"),
+        help="Local env file for provider credentials. Defaults to a profile-specific ~/.botsdock/botsdock_connector.<profile>.env or ~/.botsdock/botsdock_connector.env when present.",
     )
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
@@ -121,16 +133,26 @@ def normalize_runtime_profile_id(value: Any) -> str:
 
 
 def default_env_file(runtime_profile_id: str | None = None) -> str | None:
-    configured = os.environ.get("BOTSDOCK_AGENT_ENV_FILE")
+    configured = os.environ.get("BOTSDOCK_CONNECTOR_ENV_FILE") or os.environ.get(
+        "BOTSDOCK_AGENT_ENV_FILE"
+    )
     if configured:
         return configured
     profile_id = normalize_runtime_profile_id(runtime_profile_id)
     if profile_id != DEFAULT_RUNTIME_PROFILE_ID:
-        profile_path = Path.home() / ".botsdock" / f"agent_connector.{profile_id}.env"
-        if profile_path.exists():
-            return str(profile_path)
-    path = Path.home() / ".botsdock" / "agent_connector.env"
-    return str(path) if path.exists() else None
+        for profile_path in (
+            Path.home() / ".botsdock" / f"botsdock_connector.{profile_id}.env",
+            Path.home() / ".botsdock" / f"agent_connector.{profile_id}.env",
+        ):
+            if profile_path.exists():
+                return str(profile_path)
+    for path in (
+        Path.home() / ".botsdock" / "botsdock_connector.env",
+        Path.home() / ".botsdock" / "agent_connector.env",
+    ):
+        if path.exists():
+            return str(path)
+    return None
 
 
 def load_env_file(path: str | None) -> dict[str, str]:
@@ -205,7 +227,7 @@ def _runtime_profile_log_line(profile: JsonDict) -> str:
     env_file = "configured" if profile.get("env_file_configured") else "none"
     model = profile.get("model") or "default"
     return (
-        "agent connector claude runtime: "
+        "botsdock connector claude runtime: "
         f"profile={profile.get('id') or DEFAULT_RUNTIME_PROFILE_ID} "
         f"auth_source={profile.get('auth_source') or 'unknown'} "
         f"cli={profile.get('cli_label') or 'sdk_default'} "
@@ -355,7 +377,7 @@ class ClaudeCodeConnector:
         if msg_type == "app_server.turn_start":
             turn_id = str(payload.get("turn_id") or request_id)
             print(
-                "agent connector claude turn start: "
+                "botsdock connector claude turn start: "
                 f"thread={payload.get('thread_id')} turn={turn_id} "
                 f"cwd={payload.get('cwd')} session={payload.get('provider_session_id')}",
                 file=sys.stderr,
@@ -431,7 +453,7 @@ class ClaudeCodeConnector:
                 opened = approval_envelope_to_request_opened(envelope, request)
                 if opened is not None:
                     print(
-                        "agent connector claude approval requested: "
+                        "botsdock connector claude approval requested: "
                         f"thread={request.get('thread_id')} turn={request.get('turn_id')} "
                         f"request={opened.get('app_server_request_id')} "
                         f"method={opened.get('method')}",
@@ -449,7 +471,7 @@ class ClaudeCodeConnector:
                 result = payload.get("result")
                 summary = error_text or result or payload.get("status")
                 print(
-                    "agent connector claude turn terminal: "
+                    "botsdock connector claude turn terminal: "
                     f"type={envelope.type} thread={request.get('thread_id')} "
                     f"turn={request.get('turn_id')} session={payload.get('provider_session_id')} "
                     f"summary={str(summary or '')[:240]}",
@@ -475,7 +497,7 @@ class ClaudeCodeConnector:
 
 
 def reconnect_command(args: argparse.Namespace) -> str:
-    parts = ["botsdock-agent-connector"]
+    parts = ["botsdock-connector"]
     if args.server.rstrip("/") != DEFAULT_SERVER:
         parts.extend(["--server", args.server])
     if args.cwd and args.cwd != ".":
@@ -688,7 +710,7 @@ async def run_connector_once_for_spec(args: argparse.Namespace, spec: Connection
     connection_args = _connection_args(args, spec)
     ws_url = backend_ws_url(spec.server, spec.machine_id)
     print(
-        f"agent connector connecting: server={spec.server.rstrip('/')} machine={spec.machine_id}",
+        f"botsdock connector connecting: server={spec.server.rstrip('/')} machine={spec.machine_id}",
         file=sys.stderr,
     )
     async with websockets.connect(
@@ -701,7 +723,7 @@ async def run_connector_once_for_spec(args: argparse.Namespace, spec: Connection
         bootstrap = await send_bootstrap(websocket, connection_args)
         provider = bootstrap["provider"]
         print(
-            f"agent connector selected provider: {provider} machine={spec.machine_id}",
+            f"botsdock connector selected provider: {provider} machine={spec.machine_id}",
             file=sys.stderr,
         )
         if provider == CODEX_AGENT_PROVIDER:
@@ -733,7 +755,7 @@ async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supe
             await run_connector_once_for_spec(args, spec)
             attempt = 0
             print(
-                f"agent connector disconnected; reconnecting {connection_label(spec)}",
+                f"botsdock connector disconnected; reconnecting {connection_label(spec)}",
                 file=sys.stderr,
             )
         except KeyboardInterrupt:
@@ -742,20 +764,20 @@ async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supe
             if is_non_retriable_connector_error(exc):
                 if supervised:
                     print(
-                        f"agent connector stopped {connection_label(spec)}: {exc}",
+                        f"botsdock connector stopped {connection_label(spec)}: {exc}",
                         file=sys.stderr,
                     )
                     return
                 raise
             attempt += 1
             print(
-                f"agent connector connection failed {connection_label(spec)}: {exc}",
+                f"botsdock connector connection failed {connection_label(spec)}: {exc}",
                 file=sys.stderr,
             )
         except Exception as exc:
             attempt += 1
             print(
-                f"agent connector connection failed {connection_label(spec)}: {exc}",
+                f"botsdock connector connection failed {connection_label(spec)}: {exc}",
                 file=sys.stderr,
             )
 
@@ -764,18 +786,18 @@ async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supe
         delay = min(max_delay, base_delay * (2 ** min(attempt, 6)))
         delay = delay * random.uniform(0.75, 1.25)
         print(
-            f"agent connector reconnecting {connection_label(spec)} in {delay:.1f}s",
+            f"botsdock connector reconnecting {connection_label(spec)} in {delay:.1f}s",
             file=sys.stderr,
         )
         await asyncio.sleep(delay)
 
 
 async def run_supervisor(args: argparse.Namespace, specs: list[ConnectionSpec]) -> None:
-    print(f"agent connector supervising {len(specs)} saved connection(s)", file=sys.stderr)
+    print(f"botsdock connector supervising {len(specs)} saved connection(s)", file=sys.stderr)
     tasks = [
         asyncio.create_task(
             run_connection(args, spec, supervised=len(specs) > 1),
-            name=f"agent-connector:{spec.machine_id}",
+            name=f"botsdock-connector:{spec.machine_id}",
         )
         for spec in specs
     ]
@@ -844,8 +866,8 @@ async def save_accepted_token(
         },
         cwd=connector_cwd,
     )
-    print(f"agent connector token saved: {token_path}", file=sys.stderr)
-    print(f"agent connector reconnect command: {reconnect_command(args)}", file=sys.stderr)
+    print(f"botsdock connector token saved: {token_path}", file=sys.stderr)
+    print(f"botsdock connector reconnect command: {reconnect_command(args)}", file=sys.stderr)
 
 
 async def run_claude_provider_session(
@@ -859,12 +881,12 @@ async def run_claude_provider_session(
     profile_env = load_env_file(getattr(args, "env_file", None))
     if profile_env:
         print(
-            f"agent connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
+            f"botsdock connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
             file=sys.stderr,
         )
     if getattr(args, "claude_bin", None):
         print(
-            f"agent connector using Claude CLI: {args.claude_bin}",
+            f"botsdock connector using Claude CLI: {args.claude_bin}",
             file=sys.stderr,
         )
     provider = ClaudeAgentSdkProvider(
@@ -885,9 +907,9 @@ async def run_claude_provider_session(
     print(_runtime_profile_log_line(runtime_profile), file=sys.stderr)
     if _should_warn_missing_claude_env(runtime_profile):
         print(
-            "agent connector claude runtime warning: no exported Claude provider env keys detected; "
+            "botsdock connector claude runtime warning: no exported Claude provider env keys detected; "
             "if your Claude CLI uses a third-party gateway, start the connector from that exported "
-            "shell or set --env-file ~/.botsdock/agent_connector.env",
+            "shell or set --env-file ~/.botsdock/botsdock_connector.env",
             file=sys.stderr,
         )
     connector = ClaudeCodeConnector(provider=provider, outbound=outbound)
@@ -903,12 +925,12 @@ async def run_claude_provider_session(
         connector_cwd=connector_cwd,
     )
     print(
-        f"agent connector accepted: provider=claude_code machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
+        f"botsdock connector accepted: provider=claude_code machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
         file=sys.stderr,
     )
     if getattr(args, "registration_only", False):
         print(
-            "agent connector registration saved; run `botsdock-agent-connector` to start all saved connections",
+            "botsdock connector registration saved; run `botsdock-connector` to start all saved connections",
             file=sys.stderr,
         )
         return
@@ -943,7 +965,7 @@ async def run_claude_provider_session(
             message = json.loads(raw)
             if message.get("type") in {"connector.error", "connection.error"}:
                 print(
-                    f"agent connector backend error: {message.get('error') or message}",
+                    f"botsdock connector backend error: {message.get('error') or message}",
                     file=sys.stderr,
                 )
                 continue
@@ -1002,12 +1024,12 @@ async def run_codex_provider_session(
             connector_cwd=connector_cwd,
         )
         print(
-            f"agent connector accepted: provider=codex machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
+            f"botsdock connector accepted: provider=codex machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
             file=sys.stderr,
         )
         if getattr(args, "registration_only", False):
             print(
-                "agent connector registration saved; run `botsdock-agent-connector` to start all saved connections",
+                "botsdock connector registration saved; run `botsdock-connector` to start all saved connections",
                 file=sys.stderr,
             )
             return
@@ -1043,7 +1065,7 @@ async def run_codex_provider_session(
                 message = json.loads(raw)
                 if message.get("type") in {"connector.error", "connection.error"}:
                     print(
-                        f"agent connector backend error: {message.get('error') or message}",
+                        f"botsdock connector backend error: {message.get('error') or message}",
                         file=sys.stderr,
                     )
                     continue
@@ -1097,5 +1119,5 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        print(f"agent connector error: {exc}", file=sys.stderr)
+        print(f"botsdock connector error: {exc}", file=sys.stderr)
         return 1

@@ -75,7 +75,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         "allowed_tools": ["Read", "Glob", "Grep", "LS"],
         "permission_mode": "dontAsk",
         "setting_sources": ["user", "project", "local"],
-        "env": {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-agent-connector-smoke"},
+        "env": {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-connector-smoke"},
     }
     if args.model:
         options_kwargs["model"] = args.model

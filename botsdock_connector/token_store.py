@@ -10,8 +10,9 @@ from typing import Any
 
 JsonDict = dict[str, Any]
 
-TOKEN_STORE_FILE = ".botsdock_agent_connector.json"
+TOKEN_STORE_FILE = ".botsdock_connector.json"
 LEGACY_TOKEN_STORE_FILES = (
+    ".botsdock_agent_connector.json",
     ".codex_connector.json",
     ".botsdock_codex_connector.json",
 )
