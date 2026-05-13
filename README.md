@@ -20,6 +20,15 @@ Until the package is published to PyPI, install from the GitHub repo:
 python3 -m pip install --upgrade git+https://github.com/bourne015/botsdock-connector.git
 ```
 
+If pip builds an `UNKNOWN-0.0.0` package, upgrade the local packaging tools and
+reinstall:
+
+```bash
+python3 -m pip uninstall -y UNKNOWN
+python3 -m pip install --user --upgrade pip setuptools wheel
+python3 -m pip install --user --upgrade --force-reinstall git+https://github.com/bourne015/botsdock-connector.git
+```
+
 After installation, users can upgrade in place with:
 
 ```bash
