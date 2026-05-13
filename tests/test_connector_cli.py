@@ -135,7 +135,11 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
         cwd=".",
         runtime_profile_id="deepseek",
         runtime_profile_name="DeepSeek",
-        env_overrides={"ANTHROPIC_BASE_URL": "https://example.test", "ANTHROPIC_AUTH_TOKEN": "secret"},
+        env_overrides={
+            "ANTHROPIC_BASE_URL": "https://example.test",
+            "ANTHROPIC_AUTH_TOKEN": "secret",
+            "ANTHROPIC_MODEL": "deepseek-v4-pro",
+        },
         env_file="/tmp/profile.env",
     )
     hello = provider_hello(provider, connector_version="test")
@@ -145,6 +149,8 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     assert hello["active_runtime_profile_id"] == "deepseek"
     assert hello["runtime_profiles"][0]["display_name"] == "DeepSeek"
     assert hello["runtime_profiles"][0]["auth_source"] == "env_file"
+    assert hello["runtime_profiles"][0]["model"] == "deepseek-v4-pro"
+    assert hello["runtime_profiles"][0]["model_source"] == "env_file"
     assert "ANTHROPIC_API_KEY" in hello["runtime_profiles"][0]["env_keys"]
     assert "ANTHROPIC_AUTH_TOKEN" in hello["runtime_profiles"][0]["env_keys"]
     assert hello["runtime_profiles"][0]["has_claude_auth_env"] is True
@@ -161,6 +167,16 @@ def test_hello_and_backend_event_shape_are_provider_neutral() -> None:
     assert message["event_type"] == "assistant.message"
     assert message["payload"]["provider"] == "claude_code"
     assert message["payload"]["provider_event_id"] == "event_1"
+
+
+def test_claude_runtime_profile_marks_cli_default_model(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SUBAGENT_MODEL", raising=False)
+    provider = ClaudeAgentSdkProvider(cwd=".", runtime_profile_id="default")
+    profile = provider.runtime_profile_report()
+    assert profile["model"] is None
+    assert profile["model_source"] == "cli_default"
+    assert profile["display_name"] == "CLI default"
 
 
 def test_claude_approval_envelope_opens_submit_ready_request() -> None:

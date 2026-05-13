@@ -316,13 +316,14 @@ def _runtime_profile_log_line(profile: JsonDict) -> str:
         visible_keys.append(f"+{len(keys) - len(visible_keys)} more")
     env_keys = ",".join(visible_keys) if visible_keys else "none"
     env_file = "configured" if profile.get("env_file_configured") else "none"
-    model = profile.get("model") or "default"
+    model = profile.get("model") or "cli_default"
+    model_source = profile.get("model_source") or "unknown"
     return (
         "botsdock connector claude runtime: "
         f"profile={profile.get('id') or DEFAULT_RUNTIME_PROFILE_ID} "
         f"auth_source={profile.get('auth_source') or 'unknown'} "
         f"cli={profile.get('cli_label') or 'sdk_default'} "
-        f"model={model} env_file={env_file} env_keys={env_keys}"
+        f"model={model} model_source={model_source} env_file={env_file} env_keys={env_keys}"
     )
 
 

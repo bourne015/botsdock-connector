@@ -71,6 +71,10 @@ _GATEWAY_AUTH_ENV_KEYS = {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
 }
+_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
 _APPROVAL_ALLOW_DECISIONS = {
     "accept",
     "accepted",
@@ -202,6 +206,19 @@ def _is_auth_required_text(value: str | None) -> bool:
 
 def _is_runtime_env_key(key: str) -> bool:
     return key in _RUNTIME_ENV_NAMES or key.startswith(_RUNTIME_ENV_PREFIXES)
+
+
+def _clean_model_name(value: Any) -> str | None:
+    text = _string(value)
+    if not text:
+        return None
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+    lowered = trimmed.lower().replace("_", " ").replace("-", " ")
+    if lowered in {"default", "default cli", "cli default", "sdk default"}:
+        return None
+    return trimmed
 
 
 def _encoded_claude_cwd(cwd: str) -> str:
@@ -679,17 +696,12 @@ class ClaudeAgentSdkProvider:
         elif any(key in env_keys for key in _CLAUDE_AUTH_ENV_KEYS):
             auth_source = "environment"
         gateway_env_keys = sorted(key for key in env_keys if key in _GATEWAY_AUTH_ENV_KEYS)
-        model = (
-            self.model
-            or self.env_overrides.get("ANTHROPIC_MODEL")
-            or self.env_overrides.get("CLAUDE_CODE_SUBAGENT_MODEL")
-            or os.environ.get("ANTHROPIC_MODEL")
-            or os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
-        )
+        model, model_source = self._runtime_model()
         return {
             "id": self.runtime_profile_id,
             "display_name": self.runtime_profile_name
-            or ("Default CLI" if self.runtime_profile_id == "default" else self.runtime_profile_id),
+            or model
+            or ("CLI default" if self.runtime_profile_id == "default" else self.runtime_profile_id),
             "provider": self.name,
             "runtime": "claude_agent_sdk",
             "auth_source": auth_source,
@@ -698,8 +710,23 @@ class ClaudeAgentSdkProvider:
             "has_claude_auth_env": any(key in env_keys for key in _CLAUDE_AUTH_ENV_KEYS),
             "env_file_configured": bool(self.env_file),
             "model": model,
+            "model_source": model_source,
             "cli_label": Path(self.cli_path).name if self.cli_path else "sdk_default",
         }
+
+    def _runtime_model(self) -> tuple[str | None, str]:
+        model = _clean_model_name(self.model)
+        if model:
+            return model, "argument"
+        for key in _MODEL_ENV_KEYS:
+            model = _clean_model_name(self.env_overrides.get(key))
+            if model:
+                return model, "env_file" if self.env_file else "environment"
+        for key in _MODEL_ENV_KEYS:
+            model = _clean_model_name(os.environ.get(key))
+            if model:
+                return model, "environment"
+        return None, "cli_default"
 
     def read_thread_history(self, request: JsonDict) -> JsonDict:
         session_id = (
