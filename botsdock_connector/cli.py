@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the BotsDock connector",
     )
     parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
         "--server",
         default=os.environ.get(
             "BOTSDOCK_CONNECTOR_SERVER",
