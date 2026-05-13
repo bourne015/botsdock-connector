@@ -12,6 +12,38 @@ Supported providers:
 - `codex`: local `codex app-server`
 - `claude_code`: official Claude Agent SDK (`claude-agent-sdk`)
 
+## Install and upgrade
+
+Until the package is published to PyPI, install from the GitHub repo:
+
+```bash
+python3 -m pip install --upgrade git+https://github.com/bourne015/botsdock-connector.git
+```
+
+After installation, users can upgrade in place with:
+
+```bash
+botsdock-connector upgrade
+```
+
+`upgrade` uses the current Python environment and runs pip against the GitHub
+repo by default. A specific release tag can be selected with:
+
+```bash
+botsdock-connector upgrade --version v0.1.1
+```
+
+After a PyPI release, users can switch the source explicitly:
+
+```bash
+botsdock-connector upgrade --source pypi
+```
+
+For private mirrors or a custom release channel, set
+`BOTSDOCK_CONNECTOR_UPGRADE_SPEC` or pass `--package-spec`. The running
+connector process is not hot-swapped; stop and restart `botsdock-connector`
+after the upgrade completes.
+
 ## Development
 
 Install the package in editable mode:

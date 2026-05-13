@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from botsdock_connector.cli import (
     _connection_args,
     approval_envelope_to_request_opened,
     build_parser,
+    build_upgrade_pip_args,
     envelope_to_backend_message,
     load_env_file,
     provider_hello,
@@ -251,6 +253,34 @@ def test_parser_defaults_to_claude_cli_on_path() -> None:
                 os.environ[key] = value
 
     assert args.claude_bin == "/tmp/claude"
+
+
+def test_upgrade_subcommand_defaults_to_github_install() -> None:
+    args = build_parser().parse_args(["upgrade", "--dry-run"])
+
+    command = build_upgrade_pip_args(args)
+
+    assert args.command == "upgrade"
+    assert command == [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "git+https://github.com/bourne015/botsdock-connector.git",
+    ]
+
+
+def test_upgrade_subcommand_supports_github_ref_and_pypi_version() -> None:
+    github_args = build_parser().parse_args(["upgrade", "--version", "v0.1.1"])
+    pypi_args = build_parser().parse_args(
+        ["upgrade", "--source", "pypi", "--version", "0.1.1"]
+    )
+
+    assert build_upgrade_pip_args(github_args)[-1] == (
+        "git+https://github.com/bourne015/botsdock-connector.git@v0.1.1"
+    )
+    assert build_upgrade_pip_args(pypi_args)[-1] == "botsdock-connector==0.1.1"
 
 
 def test_saved_connectors_can_be_loaded_together() -> None:

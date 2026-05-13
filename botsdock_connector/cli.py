@@ -8,6 +8,7 @@ import random
 import shutil
 import shlex
 import socket
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ JsonDict = dict[str, Any]
 CODEX_AGENT_PROVIDER = "codex"
 CLAUDE_CODE_AGENT_PROVIDER = "claude_code"
 DEFAULT_RUNTIME_PROFILE_ID = "default"
+PYPI_UPGRADE_SPEC = "botsdock-connector"
+GITHUB_UPGRADE_SPEC = "git+https://github.com/bourne015/botsdock-connector.git"
 
 
 @dataclass
@@ -123,8 +126,96 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reconnect-initial-delay", type=float, default=1.0)
     parser.add_argument("--reconnect-max-delay", type=float, default=30.0)
+    subparsers = parser.add_subparsers(dest="command")
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help="Upgrade botsdock-connector in the current Python environment",
+    )
+    upgrade_parser.add_argument(
+        "--source",
+        choices=("github", "pypi"),
+        default="github",
+        help="Upgrade source. Defaults to github until the package is published to PyPI.",
+    )
+    upgrade_parser.add_argument(
+        "--version",
+        default=None,
+        help="Optional version or git ref, for example v0.1.1.",
+    )
+    upgrade_parser.add_argument(
+        "--package-spec",
+        default=os.environ.get("BOTSDOCK_CONNECTOR_UPGRADE_SPEC"),
+        help="Override the pip package spec. Also configurable via BOTSDOCK_CONNECTOR_UPGRADE_SPEC.",
+    )
+    upgrade_parser.add_argument(
+        "--user",
+        action="store_true",
+        help="Pass --user to pip when upgrading outside a virtual environment.",
+    )
+    upgrade_parser.add_argument(
+        "--pre",
+        action="store_true",
+        help="Allow pre-release versions when upgrading from PyPI.",
+    )
+    upgrade_parser.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        help="Ask pip to reinstall even if the selected version is already installed.",
+    )
+    upgrade_parser.add_argument(
+        "--pip-arg",
+        action="append",
+        default=[],
+        help="Additional argument passed through to pip. Repeat for multiple args.",
+    )
+    upgrade_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the pip command without running it.",
+    )
     parser.set_defaults(reconnect=True)
     return parser
+
+
+def _upgrade_spec_with_version(spec: str, version: str | None) -> str:
+    if not version:
+        return spec
+    if spec.startswith("git+"):
+        base = spec.rsplit("@", 1)[0] if "@" in spec.rsplit("/", 1)[-1] else spec
+        return f"{base}@{version}"
+    return f"{spec}=={version}"
+
+
+def build_upgrade_pip_args(args: argparse.Namespace) -> list[str]:
+    package_spec = args.package_spec
+    if not package_spec:
+        package_spec = GITHUB_UPGRADE_SPEC if args.source == "github" else PYPI_UPGRADE_SPEC
+    package_spec = _upgrade_spec_with_version(str(package_spec), args.version)
+    command = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    if args.user:
+        command.append("--user")
+    if args.pre:
+        command.append("--pre")
+    if args.force_reinstall:
+        command.append("--force-reinstall")
+    command.extend(str(item) for item in (args.pip_arg or []))
+    command.append(package_spec)
+    return command
+
+
+def run_upgrade(args: argparse.Namespace) -> int:
+    command = build_upgrade_pip_args(args)
+    printable = " ".join(shlex.quote(part) for part in command)
+    print(f"botsdock connector upgrade command: {printable}", file=sys.stderr)
+    if args.dry_run:
+        return 0
+    result = subprocess.run(command)
+    if result.returncode == 0:
+        print(
+            "botsdock connector upgrade finished. Restart botsdock-connector to use the new version.",
+            file=sys.stderr,
+        )
+    return result.returncode
 
 
 def normalize_runtime_profile_id(value: Any) -> str:
@@ -1113,6 +1204,8 @@ async def run_connector(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.command == "upgrade":
+        return run_upgrade(args)
     try:
         asyncio.run(run_connector(args))
         return 0
