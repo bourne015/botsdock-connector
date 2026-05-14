@@ -22,6 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import __version__
+
 
 JsonDict = dict[str, Any]
 
@@ -122,7 +124,7 @@ class AppServerProcessClient:
                 "clientInfo": {
                     "name": "botsdock_codex_remote_console",
                     "title": "Bots Dock Codex Connector",
-                    "version": "0.1.0",
+                    "version": __version__,
                 },
                 "capabilities": {
                     "experimentalApi": True,
@@ -241,7 +243,7 @@ class CodexConnector:
             return self.app_server.initialize()
         return {}
 
-    def hello(self, *, connector_version: str = "0.1.0") -> JsonDict:
+    def hello(self, *, connector_version: str = __version__) -> JsonDict:
         return {
             "type": "connector.hello",
             "provider": "codex",

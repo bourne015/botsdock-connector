@@ -47,18 +47,28 @@ def backend_ws_url(server_url: str, machine_id: str) -> str:
 
 
 def token_store_path(cwd: str | None = None) -> Path:
-    return Path(cwd or Path.cwd()).expanduser().resolve() / TOKEN_STORE_FILE
+    # Keep the cwd argument for older callers; new writes always go to the user home.
+    del cwd
+    return Path.home().expanduser().resolve() / TOKEN_STORE_FILE
 
 
 def read_token_store_path(cwd: str | None = None) -> Path:
-    base = Path(cwd or Path.cwd()).expanduser().resolve()
-    path = base / TOKEN_STORE_FILE
+    path = token_store_path()
     if path.exists():
         return path
-    for filename in LEGACY_TOKEN_STORE_FILES:
-        legacy = base / filename
-        if legacy.exists():
-            return legacy
+    bases: list[Path] = [path.parent]
+    legacy_base = (
+        Path(cwd).expanduser().resolve()
+        if cwd
+        else Path.cwd().expanduser().resolve()
+    )
+    if legacy_base not in bases:
+        bases.append(legacy_base)
+    for base in bases:
+        for filename in (TOKEN_STORE_FILE, *LEGACY_TOKEN_STORE_FILES):
+            legacy = base / filename
+            if legacy.exists():
+                return legacy
     return path
 
 

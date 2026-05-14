@@ -36,10 +36,12 @@ botsdock-connector upgrade
 ```
 
 `upgrade` uses the current Python environment and runs pip against the GitHub
-repo by default. A specific release tag can be selected with:
+repo by default. GitHub upgrades force a reinstall and disable pip's wheel cache
+so a new commit is picked up even before the package version changes. A specific
+release tag can be selected with:
 
 ```bash
-botsdock-connector upgrade --version v0.1.4
+botsdock-connector upgrade --version v0.1.5
 ```
 
 After a PyPI release, users can switch the source explicitly:
@@ -61,8 +63,7 @@ Install the package in editable mode:
 python3 -m pip install -e .
 ```
 
-Run the generated registration command once from the directory where you want
-to keep the connector token file:
+Run the generated registration command once:
 
 ```bash
 botsdock-connector --machine-id mach_xxx --token token_xxx
@@ -72,7 +73,7 @@ botsdock-connector --machine-id mach_xxx --token token_xxx
 only for staging, self-hosted, or local debugging environments.
 
 After each successful registration, the connector token is saved in
-`.botsdock_connector.json`, and the registration command exits. A plain
+`~/.botsdock_connector.json`, and the registration command exits. A plain
 connector start runs every saved machine connection in one process. For a
 normal physical machine there is one saved connection, and Codex plus Claude
 Code run side by side through that connection:
@@ -159,8 +160,8 @@ botsdock-connector \
   --env-file ~/.botsdock/botsdock_connector.deepseek.env
 ```
 
-注册成功后，profile id/name、env 文件路径、模型覆盖和 CLI 路径会写入本地
-`.botsdock_connector.json`。之后直接运行：
+注册成功后，profile id/name、env 文件路径、模型覆盖和 CLI 路径会写入用户根目录的
+`~/.botsdock_connector.json`。之后直接运行：
 
 ```bash
 botsdock-connector
@@ -172,8 +173,8 @@ profile id、display name、env key 名称、模型名和 CLI 标签；env 文�
 token 值不会发送到 BotsDock。
 
 旧版本生成的 `.botsdock_agent_connector.json`、`.codex_connector.json` 和
-`.botsdock_codex_connector.json` 仍会被读取；新的注册和 token 刷新会写入
-`.botsdock_connector.json`。
+`.botsdock_codex_connector.json`，以及旧版本在运行目录生成的 token 文件仍会被读取；
+新的注册和 token 刷新会写入 `~/.botsdock_connector.json`。
 
 Claude Code history import is best-effort and isolated inside the
 `claude_code` provider driver. The connector first tries the official Claude

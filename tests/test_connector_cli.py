@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,20 @@ from botsdock_connector.token_store import (
     save_connector_token,
     token_store_key,
 )
+
+
+@contextmanager
+def _temporary_home():
+    previous = os.environ.get("HOME")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["HOME"] = tmp
+        try:
+            yield tmp
+        finally:
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
 
 
 @dataclass
@@ -283,6 +298,8 @@ def test_upgrade_subcommand_defaults_to_github_install() -> None:
         "pip",
         "install",
         "--upgrade",
+        "--force-reinstall",
+        "--no-cache-dir",
         "git+https://github.com/bourne015/botsdock-connector.git",
     ]
 
@@ -300,7 +317,7 @@ def test_upgrade_subcommand_supports_github_ref_and_pypi_version() -> None:
 
 
 def test_saved_connectors_can_be_loaded_together() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temporary_home() as tmp:
         save_connector_token(
             server_url=DEFAULT_SERVER,
             machine_id="mach_codex",
@@ -338,18 +355,20 @@ def test_saved_connectors_can_be_loaded_together() -> None:
 
 
 def test_token_store_uses_new_filename_and_reads_legacy_store() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temporary_home() as home, tempfile.TemporaryDirectory() as run_dir:
         token_path = save_connector_token(
             server_url=DEFAULT_SERVER,
             machine_id="mach_new",
             token="token_new",
             provider="codex",
-            cwd=tmp,
+            cwd=run_dir,
         )
         assert token_path.name == ".botsdock_connector.json"
+        assert token_path.parent == Path(home).resolve()
+        assert not (Path(run_dir) / ".botsdock_connector.json").exists()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        legacy_path = Path(tmp) / ".botsdock_agent_connector.json"
+    with _temporary_home(), tempfile.TemporaryDirectory() as run_dir:
+        legacy_path = Path(run_dir) / ".botsdock_agent_connector.json"
         legacy_key = token_store_key(DEFAULT_SERVER, "mach_legacy")
         legacy_path.write_text(
             json.dumps(
@@ -371,7 +390,7 @@ def test_token_store_uses_new_filename_and_reads_legacy_store() -> None:
         loaded = load_connector_token(
             server_url=DEFAULT_SERVER,
             machine_id="mach_legacy",
-            cwd=tmp,
+            cwd=run_dir,
         )
 
     assert loaded == "token_legacy"
@@ -389,7 +408,7 @@ def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:
         model = None
         claude_bin = None
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temporary_home() as tmp:
         Args.cwd = tmp
         save_connector_token(
             server_url=DEFAULT_SERVER,
@@ -430,7 +449,7 @@ def test_machine_id_connection_resolution_preserves_saved_runtime_profile() -> N
         model = None
         claude_bin = None
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temporary_home() as tmp:
         Args.cwd = tmp
         save_connector_token(
             server_url=DEFAULT_SERVER,
