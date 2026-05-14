@@ -785,13 +785,11 @@ class ClaudeCodeConnector:
                     error_text = error.get("message") or error.get("code")
                 else:
                     error_text = error
-                result = payload.get("result")
-                summary = error_text or result or payload.get("status")
                 print(
                     "botsdock connector claude turn terminal: "
                     f"type={envelope.type} thread={request.get('thread_id')} "
-                    f"turn={request.get('turn_id')} session={payload.get('provider_session_id')} "
-                    f"summary={str(summary or '')[:240]}",
+                    f"turn={request.get('turn_id')} session={payload.get('provider_session_id')}"
+                    f"{' error=' + str(error_text)[:120] if error_text else ''}",
                     file=sys.stderr,
                 )
             await self.outbound.put(
