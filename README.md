@@ -17,7 +17,14 @@ Supported providers:
 Until the package is published to PyPI, install from the GitHub repo:
 
 ```bash
-python3 -m pip install --upgrade git+https://github.com/bourne015/botsdock-connector.git
+python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
+```
+
+After installation, make sure `~/.local/bin` is on your `PATH` so the
+`botsdock-connector` command is available:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 If pip builds an `UNKNOWN-0.0.0` package, pip is too old (≤ 22.0.2). Upgrade pip

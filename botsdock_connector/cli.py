@@ -190,6 +190,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_pip_version(version_string: str) -> tuple[int, ...] | None:
+    """Parse pip version to a comparable tuple.
+
+    Handles non-standard version strings like ``22.0.2+dev`` or ``22.0.2rc1``
+    by keeping only the leading numeric prefix of each dot-separated component.
+    """
+    try:
+        parts = []
+        for part in version_string.split(".")[:3]:
+            i = 0
+            while i < len(part) and part[i].isdigit():
+                i += 1
+            if i == 0:
+                break
+            parts.append(int(part[:i]))
+        return tuple(parts) if parts else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _check_pip_version() -> bool:
     """Check that pip > 22.0.2 is available (older versions produce UNKNOWN wheels)."""
     try:
@@ -197,7 +217,15 @@ def _check_pip_version() -> bool:
     except importlib.metadata.PackageNotFoundError:
         print("botsdock connector upgrade: pip is not installed.", file=sys.stderr)
         return False
-    if tuple(map(int, pip_version.split("."))) <= (22, 0, 2):
+    parsed = _parse_pip_version(pip_version)
+    if parsed is None:
+        print(
+            f"botsdock connector upgrade: could not determine pip version ({pip_version}). "
+            "Run 'python3 -m pip install --upgrade pip' first.",
+            file=sys.stderr,
+        )
+        return False
+    if parsed <= (22, 0, 2):
         print(
             f"botsdock connector upgrade: pip > 22.0.2 is required, found {pip_version}. "
             "Run 'python3 -m pip install --upgrade pip' first.",
