@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata
 import json
 import os
 import random
@@ -189,6 +190,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _check_pip_version() -> bool:
+    """Check that pip > 22.0.2 is available (older versions produce UNKNOWN wheels)."""
+    try:
+        pip_version = importlib.metadata.version("pip")
+    except importlib.metadata.PackageNotFoundError:
+        print("botsdock connector upgrade: pip is not installed.", file=sys.stderr)
+        return False
+    if tuple(map(int, pip_version.split("."))) <= (22, 0, 2):
+        print(
+            f"botsdock connector upgrade: pip > 22.0.2 is required, found {pip_version}. "
+            "Run 'python3 -m pip install --upgrade pip' first.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _upgrade_spec_with_version(spec: str, version: str | None) -> str:
     if not version:
         return spec
@@ -215,14 +233,41 @@ def build_upgrade_pip_args(args: argparse.Namespace) -> list[str]:
         command.append("--pre")
     if args.force_reinstall or git_install:
         command.append("--force-reinstall")
-    if git_install:
-        command.append("--no-cache-dir")
     command.extend(str(item) for item in (args.pip_arg or []))
     command.append(package_spec)
     return command
 
 
+def _get_installed_version() -> str | None:
+    try:
+        return importlib.metadata.version("botsdock-connector")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _get_package_version_via_subprocess() -> str | None:
+    """Read installed version via a fresh subprocess, avoiding importlib caches."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "from importlib.metadata import version; print(version('botsdock-connector'))"],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip() or None
+    except Exception:
+        return None
+
+
 def run_upgrade(args: argparse.Namespace) -> int:
+    if not _check_pip_version():
+        return 1
+
+    old_version = _get_installed_version()
+    if old_version:
+        print(f"Current botsdock-connector version: {old_version}", file=sys.stderr)
+    else:
+        print("botsdock-connector is not currently installed.", file=sys.stderr)
+
     command = build_upgrade_pip_args(args)
     printable = " ".join(shlex.quote(part) for part in command)
     print(f"botsdock connector upgrade command: {printable}", file=sys.stderr)
@@ -230,10 +275,23 @@ def run_upgrade(args: argparse.Namespace) -> int:
         return 0
     result = subprocess.run(command)
     if result.returncode == 0:
-        print(
-            "botsdock connector upgrade finished. Restart botsdock-connector to use the new version.",
-            file=sys.stderr,
-        )
+        new_version = _get_package_version_via_subprocess()
+        if new_version:
+            if old_version and old_version != new_version:
+                print(
+                    f"botsdock connector upgraded: {old_version} -> {new_version}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"botsdock connector version {new_version} installed.",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "botsdock connector upgrade finished. Restart botsdock-connector to use the new version.",
+                file=sys.stderr,
+            )
     return result.returncode
 
 

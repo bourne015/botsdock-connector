@@ -17,6 +17,10 @@ dev = [
     "pytest>=8",
 ]
 
+[project.urls]
+Homepage = "https://www.botsdock.cn"
+Repository = "https://github.com/bourne015/botsdock-connector"
+
 [project.scripts]
 botsdock-connector = "botsdock_connector.cli:main"
 

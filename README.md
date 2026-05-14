@@ -20,13 +20,13 @@ Until the package is published to PyPI, install from the GitHub repo:
 python3 -m pip install --upgrade git+https://github.com/bourne015/botsdock-connector.git
 ```
 
-If pip builds an `UNKNOWN-0.0.0` package, upgrade the local packaging tools and
-reinstall:
+If pip builds an `UNKNOWN-0.0.0` package, pip is too old (≤ 22.0.2). Upgrade pip
+first:
 
 ```bash
 python3 -m pip uninstall -y UNKNOWN
-python3 -m pip install --user --upgrade pip setuptools wheel
-python3 -m pip install --user --upgrade --force-reinstall git+https://github.com/bourne015/botsdock-connector.git
+python3 -m pip install --user --upgrade "pip>22.0.2"
+python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
 ```
 
 After installation, users can upgrade in place with:
@@ -36,9 +36,9 @@ botsdock-connector upgrade
 ```
 
 `upgrade` uses the current Python environment and runs pip against the GitHub
-repo by default. GitHub upgrades force a reinstall and disable pip's wheel cache
-so a new commit is picked up even before the package version changes. A specific
-release tag can be selected with:
+repo by default. GitHub upgrades force a reinstall so a new commit is picked up
+even before the package version changes. A specific release tag can be selected
+with:
 
 ```bash
 botsdock-connector upgrade --version v0.1.5

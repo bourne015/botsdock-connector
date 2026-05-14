@@ -7,3 +7,5 @@ __pycache__/
 .botsdock_agent_connector.json
 .codex_connector.json
 .botsdock_codex_connector.json
+build/
+uv.lock

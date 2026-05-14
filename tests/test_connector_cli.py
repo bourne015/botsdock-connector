@@ -299,7 +299,6 @@ def test_upgrade_subcommand_defaults_to_github_install() -> None:
         "install",
         "--upgrade",
         "--force-reinstall",
-        "--no-cache-dir",
         "git+https://github.com/bourne015/botsdock-connector.git",
     ]
 
