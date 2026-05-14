@@ -736,6 +736,27 @@ def test_claude_options_use_user_cli_settings_and_env() -> None:
     assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-connector"
 
 
+def test_claude_child_env_preserves_cli_login_lookup(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.test/anthropic")
+
+    provider = ClaudeAgentSdkProvider(cwd=".")
+
+    env = provider._claude_env_overrides()
+    report = provider.runtime_profile_report()
+
+    assert env["HOME"] == str(tmp_path)
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / ".config")
+    assert env["ANTHROPIC_BASE_URL"] == "https://example.test/anthropic"
+    assert "HOME" not in report["env_keys"]
+    assert "PATH" not in report["env_keys"]
+    assert "XDG_CONFIG_HOME" not in report["env_keys"]
+    assert "ANTHROPIC_BASE_URL" in report["env_keys"]
+
+
 def test_claude_env_auth_token_is_mirrored_for_sdk_resume() -> None:
     provider = ClaudeAgentSdkProvider(
         cwd=".",

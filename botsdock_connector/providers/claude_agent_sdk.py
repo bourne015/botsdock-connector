@@ -60,6 +60,27 @@ _RUNTIME_ENV_NAMES = {
     "https_proxy",
     "no_proxy",
 }
+_CLAUDE_CHILD_BASE_ENV_NAMES = {
+    "APPDATA",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERPROFILE",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+}
 _CLAUDE_AUTH_ENV_KEYS = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -1189,7 +1210,12 @@ class ClaudeAgentSdkProvider:
         return self._sdk.ClaudeAgentOptions(**kwargs)
 
     def _claude_env_overrides(self) -> dict[str, str]:
-        env = {"CLAUDE_AGENT_SDK_CLIENT_APP": "botsdock-connector"}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in _CLAUDE_CHILD_BASE_ENV_NAMES
+        }
+        env["CLAUDE_AGENT_SDK_CLIENT_APP"] = "botsdock-connector"
         for key, value in os.environ.items():
             if _is_runtime_env_key(key):
                 env[key] = value

@@ -39,7 +39,7 @@ botsdock-connector upgrade
 repo by default. A specific release tag can be selected with:
 
 ```bash
-botsdock-connector upgrade --version v0.1.1
+botsdock-connector upgrade --version v0.1.3
 ```
 
 After a PyPI release, users can switch the source explicitly:
@@ -97,6 +97,13 @@ user, project, and local Claude settings and forwards Anthropic/Claude Code
 environment variables, so third-party API gateways configured through
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or related model variables are
 visible to the SDK child process.
+
+If you rely on Claude CLI login instead of API environment variables, start
+`botsdock-connector` as the same OS user that can run `claude` successfully. The
+connector preserves the child process environment needed for local credential
+lookup, including `HOME`, `PATH`, and XDG config/cache/data paths. Avoid starting
+it with `sudo` unless you also point `CLAUDE_CONFIG_DIR` or `HOME` at the
+intended user's Claude configuration.
 
 If the connector is started from a shell that does not already export those
 variables, keep them in a local-only env file instead:
