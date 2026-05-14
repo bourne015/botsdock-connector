@@ -3,123 +3,114 @@
 Provider-neutral connector for BotsDock Agent Workbench.
 
 The connector runs on the user's machine and connects outbound to Codex Web.
-The user does not choose a provider on the command line. A physical machine is
-registered once, then the connector reports the provider runtimes available on
-that machine over the same WebSocket connection.
+A physical machine is registered once, then the connector reports all provider
+runtimes available on that machine over a single WebSocket connection.
 
-Supported providers:
+## Supported providers
 
-- `codex`: local `codex app-server`
-- `claude_code`: official Claude Agent SDK (`claude-agent-sdk`)
+- `codex` — local `codex app-server`
+- `claude_code` — Claude Agent SDK (`claude-agent-sdk`)
 
-## Install and upgrade
+## Installation
 
-Until the package is published to PyPI, install from the GitHub repo:
+Until the package is published to PyPI, install from GitHub:
 
 ```bash
 python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
 ```
 
-After installation, make sure `~/.local/bin` is on your `PATH` so the
-`botsdock-connector` command is available:
+After installation, make sure `~/.local/bin` is on your `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-If pip builds an `UNKNOWN-0.0.0` package, pip is too old (≤ 22.0.2). Upgrade pip
-first:
+> **pip too old?** If the install produces an `UNKNOWN-0.0.0` wheel, your pip is
+> ≤ 22.0.2. Upgrade pip first:
+>
+> ```bash
+> python3 -m pip uninstall -y UNKNOWN
+> python3 -m pip install --user --upgrade "pip>22.0.2"
+> python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
+> ```
 
-```bash
-python3 -m pip uninstall -y UNKNOWN
-python3 -m pip install --user --upgrade "pip>22.0.2"
-python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
-```
-
-After installation, users can upgrade in place with:
+## Upgrade
 
 ```bash
 botsdock-connector upgrade
 ```
 
-`upgrade` uses the current Python environment and runs pip against the GitHub
-repo by default. GitHub upgrades force a reinstall so a new commit is picked up
-even before the package version changes. A specific release tag can be selected
-with:
+GitHub upgrades force a reinstall so new commits are picked up even when the
+version number hasn't changed. Pin a specific release tag:
 
 ```bash
 botsdock-connector upgrade --version v0.1.5
 ```
 
-After a PyPI release, users can switch the source explicitly:
+After publishing to PyPI, switch the source:
 
 ```bash
 botsdock-connector upgrade --source pypi
 ```
 
-For private mirrors or a custom release channel, set
-`BOTSDOCK_CONNECTOR_UPGRADE_SPEC` or pass `--package-spec`. The running
-connector process is not hot-swapped; stop and restart `botsdock-connector`
-after the upgrade completes.
+For private mirrors, set `BOTSDOCK_CONNECTOR_UPGRADE_SPEC` or pass
+`--package-spec`. The running connector process is not hot-swapped — stop and
+restart `botsdock-connector` after the upgrade.
 
-## Development
+## Quick start
 
-Install the package in editable mode:
-
-```bash
-python3 -m pip install -e .
-```
-
-Run the generated registration command once:
+### Register
 
 ```bash
 botsdock-connector --machine-id mach_xxx --token token_xxx
 ```
 
 `https://www.botsdock.cn` is the default backend. Pass `--server <base_url>`
-only for staging, self-hosted, or local debugging environments.
+only for staging, self-hosted, or local debugging.
 
-After each successful registration, the connector token is saved in
-`~/.botsdock_connector.json`, and the registration command exits. A plain
-connector start runs every saved machine connection in one process. For a
-normal physical machine there is one saved connection, and Codex plus Claude
-Code run side by side through that connection:
+After a successful registration the connector token is saved to
+`~/.botsdock_connector.json` and the command exits.
+
+### Run
 
 ```bash
 botsdock-connector
 ```
 
-Pass `--machine-id <id>` without `--token` when you want to debug just one saved
-machine connection.
+This starts every saved machine connection in one process. For a normal
+physical machine there is one connection — Codex and Claude Code run side by
+side through it.
 
-For Claude Code, the connector start directory is not treated as a project.
-Historical projects come from Claude Code's own session index, and new turns
-should receive an explicit workspace `cwd` from BotsDock. `--cwd <path>` is only
-an optional fallback default for debugging or one-off local setups.
+Pass `--machine-id <id>` (without `--token`) to debug a single saved connection.
 
-Claude Code runs through the local CLI configuration available to the connector
-process. By default the Claude Agent SDK chooses its bundled CLI. Set
-`BOTSDOCK_CLAUDE_BIN`, `CLAUDE_CODE_BIN`, or pass `--claude-bin <path>` only if
-you need a specific SDK-compatible CLI binary or wrapper. The connector loads
-user, project, and local Claude settings and forwards Anthropic/Claude Code
-environment variables, so third-party API gateways configured through
-`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or related model variables are
-visible to the SDK child process.
+## Configuration
 
-Claude Code ignores generic remote turn `model` values because those are often
-Codex-specific UI preferences. Configure Claude models locally with `--model`,
-`ANTHROPIC_MODEL`, or a runtime profile/env file. Provider-scoped remote model
-fields such as `provider_model` are reserved for future UI support.
+### Runtime profiles
 
-If you rely on Claude CLI login instead of API environment variables, start
-`botsdock-connector` as the same OS user that can run `claude` successfully. The
-connector preserves the child process environment needed for local credential
-lookup, including `HOME`, `PATH`, and XDG config/cache/data paths. Avoid starting
-it with `sudo` unless you also point `CLAUDE_CONFIG_DIR` or `HOME` at the
-intended user's Claude configuration.
+Multiple profiles let you switch Claude Code configurations (e.g. DeepSeek
+gateway, corporate proxy) without re-registering the machine. The default
+profile id is `default`.
 
-If the connector is started from a shell that does not already export those
-variables, keep them in a local-only env file instead:
+Register with a non-default profile:
+
+```bash
+botsdock-connector \
+  --machine-id mach_xxx \
+  --token token_xxx \
+  --runtime-profile deepseek \
+  --runtime-profile-name "DeepSeek" \
+  --env-file ~/.botsdock/botsdock_connector.deepseek.env
+```
+
+Profiles are stored in `~/.botsdock_connector.json`. On startup the connector
+reports non-sensitive metadata — profile id, display name, env key names,
+model, and CLI label — via `connector.hello`. Env file contents and tokens are
+never sent to BotsDock.
+
+### Environment file
+
+Store provider credentials locally so they reach the SDK child process without
+being sent to the server:
 
 ```bash
 mkdir -p ~/.botsdock
@@ -131,72 +122,62 @@ EOF
 botsdock-connector
 ```
 
-On macOS with zsh, variables in `~/.zprofile` are only loaded for login shells.
-If `botsdock-connector` logs `env_keys` without `ANTHROPIC_BASE_URL` and
-`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, either run `source ~/.zprofile`
-before starting the connector, move those exports to `~/.zshrc`, or use the
-dedicated `~/.botsdock/botsdock_connector.env` file above.
+For DeepSeek and other Anthropic-compatible gateways, if only
+`ANTHROPIC_AUTH_TOKEN` is set the connector mirrors it as `ANTHROPIC_API_KEY` in
+the SDK child process. This avoids a false Claude App/Keychain login prompt
+during session resume.
 
-The env file is read only by the local connector process and is never sent to
-BotsDock. You can also point at another file with `BOTSDOCK_CONNECTOR_ENV_FILE` or
-`--env-file`.
+On macOS with zsh, `~/.zprofile` exports are only loaded for login shells.
+Either `source ~/.zprofile` before starting the connector, move exports to
+`~/.zshrc`, or use the env file above.
 
-启动 Claude Code provider 时，connector 会在本地日志里打印 runtime profile
-摘要，只包含 profile id、CLI 标签、模型名、env key 名称和 env 文件是否配置，
-不会打印任何 token 值。对于 DeepSeek 这类 Anthropic-compatible 网关，如果
-本地只设置了 `ANTHROPIC_AUTH_TOKEN`，connector 会仅在 SDK 子进程环境里把它
-镜像为 `ANTHROPIC_API_KEY`，避免 Claude Agent SDK 的会话恢复流程误判为需要
-Claude App/Keychain 登录。
+### Claude Code setup
 
-## Runtime profiles
+The connector runs Claude Code through the local CLI configuration. By default
+the Claude Agent SDK chooses its bundled CLI. Set `BOTSDOCK_CLAUDE_BIN`,
+`CLAUDE_CODE_BIN`, or pass `--claude-bin <path>` for a custom binary.
 
-同一台物理机器只需要注册一次。Claude Code 的 CLI/env/model 配置属于这台
-机器上的 provider runtime profile。BotsDock 不保存 Claude、Anthropic 或
-第三方网关的登录凭据；这些凭据始终留在用户本机，由 connector 在启动
-Claude Agent SDK runtime 时注入。
+The connector preserves `HOME`, `PATH`, and XDG config/cache/data paths. It
+loads user, project, and local Claude settings and forwards Anthropic/Claude
+Code environment variables, so third-party gateways configured through
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, etc. are visible to the SDK
+child process.
 
-默认 profile id 是 `default`。如果需要使用 DeepSeek 网关、公司代理等本地
-身份，可以在首次注册或后续运行 connector 时指定 profile：
+Claude Code ignores generic remote turn `model` values (those are often
+Codex-specific). Configure models locally with `--model`, `ANTHROPIC_MODEL`,
+or a runtime profile / env file.
 
-```bash
-botsdock-connector \
-  --machine-id mach_xxx \
-  --token token_xxx \
-  --runtime-profile deepseek \
-  --runtime-profile-name "DeepSeek" \
-  --env-file ~/.botsdock/botsdock_connector.deepseek.env
-```
+If you use `claude login` instead of API keys, start the connector as the
+same OS user. Do not use `sudo` unless you also point `CLAUDE_CONFIG_DIR` or
+`HOME` at the intended user's configuration.
 
-注册成功后，profile id/name、env 文件路径、模型覆盖和 CLI 路径会写入用户根目录的
-`~/.botsdock_connector.json`。之后直接运行：
+### Legacy token files
+
+Token files from older versions (`.botsdock_agent_connector.json`,
+`.codex_connector.json`, `.botsdock_codex_connector.json`) are still read.
+New registrations always write to `~/.botsdock_connector.json`.
+
+## Development
 
 ```bash
-botsdock-connector
+python3 -m pip install -e .
 ```
 
-connector 会在一个进程中维护所有 saved machine。每条 machine connection
-会加载本地 runtime profile，并通过 `connector.hello` 上报非敏感元数据，例如
-profile id、display name、env key 名称、模型名和 CLI 标签；env 文件内容和
-token 值不会发送到 BotsDock。
+## Claude Code history import
 
-旧版本生成的 `.botsdock_agent_connector.json`、`.codex_connector.json` 和
-`.botsdock_codex_connector.json`，以及旧版本在运行目录生成的 token 文件仍会被读取；
-新的注册和 token 刷新会写入 `~/.botsdock_connector.json`。
+History import is best-effort and isolated inside the `claude_code` provider
+driver. The connector tries the official Claude Agent SDK session APIs first,
+then falls back to local JSONL transcript files under Claude Code's project
+history directory.
 
-Claude Code history import is best-effort and isolated inside the
-`claude_code` provider driver. The connector first tries the official Claude
-Agent SDK session APIs, then falls back to local transcript JSONL files under
-Claude Code's project history directory. Imported history is converted to the
-same `thread.sync` and `thread.history` shapes used by the rest of BotsDock.
-Claude transcript records that only describe local slash commands, such as
-`<local-command-caveat>` or `<local-command-stdout>`, are filtered before sync.
-Sessions with no real user turn are skipped. History sync lists Claude sessions
-across local projects, while JSONL fallback scans only top-level project
-transcripts and skips subagent transcript noise.
-Live turns started through BotsDock remain the source of truth for new events.
-When a Claude history snapshot is non-empty, it is authoritative for that
-machine, so stale Claude workspaces from older connector behavior can be pruned
-by the backend.
+Imported history is converted to the same `thread.sync` and `thread.history`
+shapes used by the rest of BotsDock. Transcript records that only describe
+local slash-commands (e.g. `<local-command-caveat>`, `<local-command-stdout>`)
+are filtered. Sessions with no real user turn are skipped.
+
+Live turns started through BotsDock remain the source of truth. When a history
+snapshot is non-empty it is authoritative for that machine, so stale workspaces
+can be pruned by the backend.
 
 ## Protocol
 
@@ -214,7 +195,7 @@ Codex Web validates the machine token and returns:
 
 The connector then sends `connector.hello` with `provider=agent` and a
 `provider_runtimes` array. Codex Web routes workspace/thread/turn/approval
-requests by the provider on each resource.
+requests by the provider on each resource:
 
 ```json
 {

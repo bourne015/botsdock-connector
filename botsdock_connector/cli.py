@@ -282,13 +282,20 @@ def _get_package_version_via_subprocess() -> str | None:
             capture_output=True, text=True,
         )
         return result.stdout.strip() or None
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return None
 
 
 def run_upgrade(args: argparse.Namespace) -> int:
     if not _check_pip_version():
         return 1
+    if args.user and sys.prefix != sys.base_prefix:
+        print(
+            "botsdock connector upgrade: warning: --user is set but running inside "
+            "a virtual environment. The package may install to the user site instead "
+            "of the venv, which is rarely what you want. Consider dropping --user.",
+            file=sys.stderr,
+        )
 
     old_version = _get_installed_version()
     if old_version:
@@ -1712,6 +1719,12 @@ async def run_connector(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    if sys.version_info < (3, 10):
+        print(
+            f"botsdock-connector requires Python >= 3.10, found {sys.version_info.major}.{sys.version_info.minor}.",
+            file=sys.stderr,
+        )
+        return 1
     args = build_parser().parse_args()
     if args.command == "upgrade":
         return run_upgrade(args)
