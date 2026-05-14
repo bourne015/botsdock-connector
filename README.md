@@ -39,7 +39,7 @@ botsdock-connector upgrade
 repo by default. A specific release tag can be selected with:
 
 ```bash
-botsdock-connector upgrade --version v0.1.3
+botsdock-connector upgrade --version v0.1.4
 ```
 
 After a PyPI release, users can switch the source explicitly:
@@ -97,6 +97,11 @@ user, project, and local Claude settings and forwards Anthropic/Claude Code
 environment variables, so third-party API gateways configured through
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or related model variables are
 visible to the SDK child process.
+
+Claude Code ignores generic remote turn `model` values because those are often
+Codex-specific UI preferences. Configure Claude models locally with `--model`,
+`ANTHROPIC_MODEL`, or a runtime profile/env file. Provider-scoped remote model
+fields such as `provider_model` are reserved for future UI support.
 
 If you rely on Claude CLI login instead of API environment variables, start
 `botsdock-connector` as the same OS user that can run `claude` successfully. The

@@ -1184,7 +1184,14 @@ class ClaudeAgentSdkProvider:
         can_use_tool: Callable[[str, JsonDict, Any], Any] | None,
     ) -> Any:
         assert self._sdk is not None
-        model = _string(_payload_value(request, "model")) or self.model
+        # The app/server may still send a generic Codex model in turn payloads.
+        # Claude Code must use the local runtime profile unless a future request
+        # sends an explicitly provider-scoped model.
+        model = (
+            _string(_payload_value(request, "claude_model"))
+            or _string(_payload_value(request, "provider_model"))
+            or self.model
+        )
         reasoning_effort = _string(_payload_value(request, "reasoning_effort"))
         provider_session_id = _string(_payload_value(request, "provider_session_id"))
         approval_policy = _string(_payload_value(request, "approval_policy"))

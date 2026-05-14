@@ -736,6 +736,42 @@ def test_claude_options_use_user_cli_settings_and_env() -> None:
     assert options["env"]["CLAUDE_AGENT_SDK_CLIENT_APP"] == "botsdock-connector"
 
 
+def test_claude_options_ignore_generic_codex_model() -> None:
+    class FakeSdk:
+        @staticmethod
+        def ClaudeAgentOptions(**kwargs):
+            return kwargs
+
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    provider._sdk = FakeSdk()
+
+    options = provider._build_options(
+        {**_request(), "payload": {"model": "gpt-5.5"}},
+        cwd=Path(".").resolve(),
+        can_use_tool=None,
+    )
+
+    assert "model" not in options
+
+
+def test_claude_options_accept_provider_scoped_model() -> None:
+    class FakeSdk:
+        @staticmethod
+        def ClaudeAgentOptions(**kwargs):
+            return kwargs
+
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    provider._sdk = FakeSdk()
+
+    options = provider._build_options(
+        {**_request(), "payload": {"model": "gpt-5.5", "provider_model": "deepseek-v4-pro"}},
+        cwd=Path(".").resolve(),
+        can_use_tool=None,
+    )
+
+    assert options["model"] == "deepseek-v4-pro"
+
+
 def test_claude_child_env_preserves_cli_login_lookup(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
