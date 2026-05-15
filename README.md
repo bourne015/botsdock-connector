@@ -2,7 +2,7 @@
 
 Provider-neutral connector for BotsDock Agent Workbench.
 
-The connector runs on the user's machine and connects outbound to Codex Web.
+The connector runs on the user's machine and connects outbound to BotsDock Console API.
 A physical machine is registered once, then the connector reports all provider
 runtimes available on that machine over a single WebSocket connection.
 
@@ -187,14 +187,14 @@ The first WebSocket message is provider-neutral:
 {"type":"connector.bootstrap"}
 ```
 
-Codex Web validates the machine token and returns:
+BotsDock Console API validates the machine token and returns:
 
 ```json
 {"type":"connector.bootstrap","provider":"agent"}
 ```
 
 The connector then sends `connector.hello` with `provider=agent` and a
-`provider_runtimes` array. Codex Web routes workspace/thread/turn/approval
+`provider_runtimes` array. BotsDock Console API routes workspace/thread/turn/approval
 requests by the provider on each resource:
 
 ```json
