@@ -298,7 +298,6 @@ def test_upgrade_subcommand_defaults_to_github_install() -> None:
         "pip",
         "install",
         "--upgrade",
-        "--force-reinstall",
         "git+https://github.com/bourne015/botsdock-connector.git",
     ]
 

@@ -244,22 +244,18 @@ def _upgrade_spec_with_version(spec: str, version: str | None) -> str:
     return f"{spec}=={version}"
 
 
-def _upgrade_uses_git(spec: str) -> bool:
-    return spec.startswith("git+")
-
 
 def build_upgrade_pip_args(args: argparse.Namespace) -> list[str]:
     package_spec = args.package_spec
     if not package_spec:
         package_spec = GITHUB_UPGRADE_SPEC if args.source == "github" else PYPI_UPGRADE_SPEC
     package_spec = _upgrade_spec_with_version(str(package_spec), args.version)
-    git_install = _upgrade_uses_git(package_spec)
     command = [sys.executable, "-m", "pip", "install", "--upgrade"]
     if args.user:
         command.append("--user")
     if args.pre:
         command.append("--pre")
-    if args.force_reinstall or git_install:
+    if args.force_reinstall:
         command.append("--force-reinstall")
     command.extend(str(item) for item in (args.pip_arg or []))
     command.append(package_spec)
