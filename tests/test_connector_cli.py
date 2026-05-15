@@ -27,7 +27,10 @@ from botsdock_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkRuntimeMissing,
     _approval_decision_allows,
 )
-from botsdock_connector.providers.codex_app_server import AppServerProcessClient
+from botsdock_connector.providers.codex_app_server import (
+    AppServerProcessClient,
+    CodexConnector,
+)
 from botsdock_connector.token_store import (
     DEFAULT_SERVER,
     load_connector_token,
@@ -719,6 +722,92 @@ def test_claude_thread_sync_and_history_read_local_transcript() -> None:
     assert turn["items"][1]["text"] == "hi"
     assert turn["items"][2]["command"] == "pwd"
     assert turn["items"][2]["aggregatedOutput"] == "workspace"
+
+
+def test_codex_thread_archive_uses_official_archive_method() -> None:
+    class FakeAppServer:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def request(self, method: str, params: dict | None = None) -> dict:
+            self.requests.append((method, params))
+            return {}
+
+    app_server = FakeAppServer()
+    connector = CodexConnector(app_server=app_server, cwd=".")
+    connector.thread_map["thread_1"] = "app_thread_1"
+    connector.reverse_thread_map["app_thread_1"] = "thread_1"
+
+    response = connector.handle_backend_message(
+        {
+            "type": "app_server.thread_archive",
+            "request_id": "req_archive",
+            "payload": {"thread_id": "thread_1"},
+        }
+    )
+
+    assert response is not None
+    assert response["status"] == "ok"
+    assert response["payload"]["archived"] is True
+    assert app_server.requests == [
+        ("thread/archive", {"threadId": "app_thread_1"})
+    ]
+    assert "thread_1" not in connector.thread_map
+    assert "app_thread_1" not in connector.reverse_thread_map
+
+
+def test_codex_thread_delete_is_reported_as_unsupported() -> None:
+    connector = CodexConnector(app_server=object(), cwd=".")
+
+    response = connector.handle_backend_message(
+        {
+            "type": "app_server.thread_delete",
+            "request_id": "req_delete",
+            "payload": {"thread_id": "thread_1"},
+        }
+    )
+
+    assert response is not None
+    assert response["status"] == "error"
+    assert response["error"]["message"] == "thread_delete_not_supported"
+
+
+def test_claude_thread_delete_removes_local_transcript() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        transcript = Path(tmp) / "session_1.jsonl"
+        transcript.write_text(
+            json.dumps({"sessionId": "session_1", "message": {"role": "user"}}),
+            encoding="utf-8",
+        )
+        previous = os.environ.get("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR")
+        os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = tmp
+        try:
+            provider = ClaudeAgentSdkProvider(cwd=tmp)
+            provider._delete_session_from_sdk = lambda session_id: False  # type: ignore[method-assign]
+            connector = ClaudeCodeConnector(provider=provider, outbound=asyncio.Queue())
+            response = asyncio.run(
+                connector.handle_backend_message(
+                    {
+                        "type": "app_server.thread_delete",
+                        "request_id": "req_delete",
+                        "payload": {
+                            "thread_id": "thread_1",
+                            "provider_session_id": "session_1",
+                        },
+                    }
+                )
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("BOTSDOCK_CLAUDE_TRANSCRIPT_DIR", None)
+            else:
+                os.environ["BOTSDOCK_CLAUDE_TRANSCRIPT_DIR"] = previous
+
+    assert response is not None
+    assert response["status"] == "ok"
+    assert response["payload"]["deleted"] is True
+    assert response["payload"]["transcript_deleted"] is True
+    assert not transcript.exists()
 
 
 def test_claude_options_use_user_cli_settings_and_env() -> None:

@@ -263,7 +263,8 @@ class CodexConnector:
                 "app_server.history_cursor",
                 "app_server.account_snapshot",
                 "app_server.thread_unsubscribe",
-                "app_server.thread_delete",
+                "app_server.thread_archive",
+                "app_server.thread_unarchive",
                 "app_server.user_input_placeholder",
                 "workspace.report",
             ],
@@ -330,9 +331,14 @@ class CodexConnector:
             if msg_type == "app_server.thread_resume":
                 payload = self._handle_thread_resume(message.get("payload") or {})
                 return self._ok(request_id, payload)
-            if msg_type == "app_server.thread_delete":
-                payload = self._handle_thread_delete(message.get("payload") or {})
+            if msg_type == "app_server.thread_archive":
+                payload = self._handle_thread_archive(message.get("payload") or {})
                 return self._ok(request_id, payload)
+            if msg_type == "app_server.thread_unarchive":
+                payload = self._handle_thread_unarchive(message.get("payload") or {})
+                return self._ok(request_id, payload)
+            if msg_type == "app_server.thread_delete":
+                raise ConnectorError("thread_delete_not_supported")
             if msg_type == "app_server.fs_watch":
                 payload = self._handle_fs_watch(message.get("payload") or {})
                 return self._ok(request_id, payload)
@@ -586,21 +592,19 @@ class CodexConnector:
         result = self._resume_app_thread(internal_thread_id, app_thread_id, payload)
         return {"app_server_thread_id": app_thread_id, "result": result}
 
-    def _handle_thread_delete(self, payload: JsonDict) -> JsonDict:
+    def _handle_thread_archive(self, payload: JsonDict) -> JsonDict:
         internal_thread_id = payload.get("thread_id")
         app_thread_id = payload.get("app_server_thread_id") or self.thread_map.get(internal_thread_id)
         if not internal_thread_id:
-            raise ConnectorError("thread_delete requires thread_id")
+            raise ConnectorError("thread_archive requires thread_id")
         if app_thread_id:
             try:
                 self.app_server.request("thread/archive", {"threadId": app_thread_id})
             except Exception:
                 pass  # Best-effort archive on the app-server side
-        # Remove from internal maps so future syncs won't report this thread
         self.thread_map.pop(internal_thread_id, None)
         if app_thread_id:
             self.reverse_thread_map.pop(app_thread_id, None)
-        # Also remove any turns tracked for this thread
         turn_ids_to_remove = [
             turn_id
             for turn_id, tid in list(self.turn_map.items())
@@ -610,7 +614,23 @@ class CodexConnector:
             rev = self.turn_map.pop(turn_id, None)
             if rev:
                 self.reverse_turn_map.pop(rev, None)
-        return {"thread_id": internal_thread_id, "deleted": True}
+        return {
+            "thread_id": internal_thread_id,
+            "app_server_thread_id": app_thread_id,
+            "archived": True,
+        }
+
+    def _handle_thread_unarchive(self, payload: JsonDict) -> JsonDict:
+        internal_thread_id = payload.get("thread_id")
+        app_thread_id = payload.get("app_server_thread_id") or self.thread_map.get(internal_thread_id)
+        if not internal_thread_id:
+            raise ConnectorError("thread_unarchive requires thread_id")
+        if not app_thread_id:
+            raise ConnectorError("thread_unarchive requires app_server_thread_id")
+        self.app_server.request("thread/unarchive", {"threadId": app_thread_id})
+        self.thread_map[internal_thread_id] = app_thread_id
+        self.reverse_thread_map[app_thread_id] = internal_thread_id
+        return {"thread_id": internal_thread_id, "app_server_thread_id": app_thread_id, "unarchived": True}
 
     def _resume_app_thread(self, internal_thread_id: str, app_thread_id: str, payload: JsonDict) -> JsonDict:
         started_at = time.monotonic()

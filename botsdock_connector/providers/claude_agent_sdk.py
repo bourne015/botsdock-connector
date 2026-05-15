@@ -763,12 +763,68 @@ class ClaudeAgentSdkProvider:
             "type": "thread.history",
             "provider": self.name,
             "thread_id": _payload_value(request, "thread_id"),
+            "provider_thread_id": session_id,
             "provider_session_id": session_id,
             "turns": page,
             "has_more_before": bool(next_cursor),
             "next_cursor": next_cursor,
             "direction": _payload_value(request, "direction") or "latest",
         }
+
+    def delete_thread(self, request: JsonDict) -> JsonDict:
+        session_id = (
+            _string(_payload_value(request, "provider_session_id"))
+            or _string(_payload_value(request, "provider_thread_id"))
+            or _string(_payload_value(request, "app_server_thread_id"))
+        )
+        if not session_id:
+            raise ValueError("thread_delete requires provider_session_id")
+
+        sdk_deleted = self._delete_session_from_sdk(session_id)
+        transcript_path = _find_transcript_file(
+            self.cwd,
+            session_id,
+            all_projects=True,
+        )
+        transcript_deleted = False
+        if transcript_path is not None:
+            try:
+                transcript_path.unlink()
+                transcript_deleted = True
+            except FileNotFoundError:
+                transcript_deleted = False
+
+        return {
+            "type": "thread.delete",
+            "provider": self.name,
+            "thread_id": _payload_value(request, "thread_id"),
+            "provider_thread_id": session_id,
+            "provider_session_id": session_id,
+            "sdk_deleted": sdk_deleted,
+            "transcript_deleted": transcript_deleted,
+            "deleted": sdk_deleted or transcript_deleted or transcript_path is None,
+        }
+
+    def _delete_session_from_sdk(self, session_id: str) -> bool:
+        sdk = self._sdk_module()
+        if sdk is None:
+            return False
+        for function_name in ("delete_session", "remove_session"):
+            delete_session = getattr(sdk, function_name, None)
+            if not callable(delete_session):
+                continue
+            try:
+                delete_session(session_id, directory=None)
+                return True
+            except TypeError:
+                try:
+                    delete_session(session_id)
+                    return True
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        return False
 
     def _sdk_module(self) -> Any | None:
         if self._sdk is not None:

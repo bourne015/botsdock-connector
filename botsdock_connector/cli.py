@@ -390,6 +390,9 @@ def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) 
         "capabilities": [
             "app_server.thread_start",
             "app_server.thread_resume",
+            "app_server.thread_archive",
+            "app_server.thread_unarchive",
+            "app_server.thread_delete",
             "app_server.turn_start",
             "app_server.turn_cancel",
             "app_server.approval_respond",
@@ -729,6 +732,35 @@ class ClaudeCodeConnector:
                     "provider_session_id": payload.get("provider_session_id"),
                 },
             )
+        if msg_type == "app_server.thread_archive":
+            return ok_response(
+                request_id,
+                {
+                    "archived": True,
+                    "provider": self.provider.name,
+                    "provider_session_id": payload.get("provider_session_id"),
+                    "local_only": True,
+                },
+            )
+        if msg_type == "app_server.thread_unarchive":
+            return ok_response(
+                request_id,
+                {
+                    "unarchived": True,
+                    "provider": self.provider.name,
+                    "provider_session_id": payload.get("provider_session_id"),
+                    "local_only": True,
+                },
+            )
+        if msg_type == "app_server.thread_delete":
+            try:
+                return ok_response(request_id, self.provider.delete_thread(payload))
+            except Exception as exc:
+                return error_response(
+                    request_id,
+                    "thread_delete_failed",
+                    str(exc) or type(exc).__name__,
+                )
         if msg_type == "connector.sync_snapshot":
             return ok_response(request_id, self.provider.thread_sync_report())
         if msg_type == "connector.thread_history":
