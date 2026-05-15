@@ -43,7 +43,7 @@ def backend_ws_url(server_url: str, machine_id: str) -> str:
         base = "wss://" + base[len("https://") :]
     elif base.startswith("http://"):
         base = "ws://" + base[len("http://") :]
-    return f"{base}/v1/codex/connect?machine_id={machine_id}"
+    return f"{base}/v1/console/connect?machine_id={machine_id}"
 
 
 def token_store_path(cwd: str | None = None) -> Path:
