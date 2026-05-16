@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.metadata
 import json
 import os
 import random
-import shutil
 import shlex
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -16,12 +16,30 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .providers.claude_agent_sdk import ClaudeAgentSdkProvider
+from .daemon import (
+    daemon_restart,
+    daemon_start,
+    daemon_status,
+    daemon_stop,
+    install_signal_handlers,
+)
+from .log import get_logger
+from .protocol import CONNECTION_MODE, PROTOCOL_VERSION
+from .providers.claude_agent_sdk import ClaudeAgentSdkProvider, _runtime_profile_log_line, _should_warn_missing_claude_env
 from .providers.codex_app_server import (
-    AppServerProcessClient,
-    BufferedBackendSender,
     CodexConnector,
     _version_label,
+)
+from .providers.app_server_client import AppServerProcessClient
+from .providers.delta_buffer import BufferedBackendSender
+from .session import (
+    SessionConfig,
+    heartbeat_sender,
+    outbound_writer,
+    message_loop,
+    run_websocket_session,
+    send_bootstrap,
+    save_accepted_token as save_token,
 )
 from .token_store import (
     DEFAULT_SERVER,
@@ -32,7 +50,9 @@ from .token_store import (
     load_saved_connectors,
     save_connector_token,
 )
+from .upgrade import build_upgrade_pip_args, run_upgrade
 
+logger = get_logger(__name__)
 
 JsonDict = dict[str, Any]
 CODEX_AGENT_PROVIDER = "codex"
@@ -44,8 +64,6 @@ SUPPORTED_CONNECTOR_PROVIDERS = {
     CLAUDE_CODE_AGENT_PROVIDER,
 }
 DEFAULT_RUNTIME_PROFILE_ID = "default"
-PYPI_UPGRADE_SPEC = "botsdock-connector"
-GITHUB_UPGRADE_SPEC = "git+https://github.com/bourne015/botsdock-connector.git"
 
 
 @dataclass
@@ -62,6 +80,10 @@ class ConnectionSpec:
     model: str | None = None
     claude_bin: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -113,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--env-file",
         default=os.environ.get("BOTSDOCK_CONNECTOR_ENV_FILE")
         or os.environ.get("BOTSDOCK_AGENT_ENV_FILE"),
-        help="Local env file for provider credentials. Defaults to a profile-specific ~/.botsdock/botsdock_connector.<profile>.env or ~/.botsdock/botsdock_connector.env when present.",
+        help="Local env file for provider credentials.",
     )
     parser.add_argument("--model", default=None, help="provider model override")
     parser.add_argument("--codex-bin", default="codex")
@@ -122,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BOTSDOCK_CLAUDE_BIN")
         or os.environ.get("CLAUDE_CODE_BIN")
         or shutil.which("claude"),
-        help="Claude Code CLI path. Defaults to BOTSDOCK_CLAUDE_BIN, CLAUDE_CODE_BIN, or the claude binary on PATH; otherwise the Agent SDK chooses its bundled CLI.",
+        help="Claude Code CLI path.",
     )
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--open-timeout", type=float, default=60)
@@ -148,17 +170,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         choices=("github", "pypi"),
         default="github",
-        help="Upgrade source. Defaults to github until the package is published to PyPI.",
+        help="Upgrade source. Defaults to github.",
     )
     upgrade_parser.add_argument(
         "--version",
         default=None,
-        help="Optional version or git ref, for example v0.1.1.",
+        help="Optional version or git ref.",
     )
     upgrade_parser.add_argument(
         "--package-spec",
         default=os.environ.get("BOTSDOCK_CONNECTOR_UPGRADE_SPEC"),
-        help="Override the pip package spec. Also configurable via BOTSDOCK_CONNECTOR_UPGRADE_SPEC.",
+        help="Override the pip package spec.",
     )
     upgrade_parser.add_argument(
         "--user",
@@ -186,145 +208,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the pip command without running it.",
     )
+    # Daemon lifecycle subcommands.
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Start the connector as a background daemon",
+    )
+    stop_parser = subparsers.add_parser(
+        "stop",
+        help="Stop a running daemon",
+    )
+    restart_parser = subparsers.add_parser(
+        "restart",
+        help="Restart the daemon (stop + start)",
+    )
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Print daemon status",
+    )
     parser.set_defaults(reconnect=True)
     return parser
 
 
-def _parse_pip_version(version_string: str) -> tuple[int, ...] | None:
-    """Parse pip version to a comparable tuple.
-
-    Handles non-standard version strings like ``22.0.2+dev`` or ``22.0.2rc1``
-    by keeping only the leading numeric prefix of each dot-separated component.
-    """
-    try:
-        parts = []
-        for part in version_string.split(".")[:3]:
-            i = 0
-            while i < len(part) and part[i].isdigit():
-                i += 1
-            if i == 0:
-                break
-            parts.append(int(part[:i]))
-        return tuple(parts) if parts else None
-    except (ValueError, TypeError):
-        return None
-
-
-def _check_pip_version() -> bool:
-    """Check that pip > 22.0.2 is available (older versions produce UNKNOWN wheels)."""
-    try:
-        pip_version = importlib.metadata.version("pip")
-    except importlib.metadata.PackageNotFoundError:
-        print("botsdock connector upgrade: pip is not installed.", file=sys.stderr)
-        return False
-    parsed = _parse_pip_version(pip_version)
-    if parsed is None:
-        print(
-            f"botsdock connector upgrade: could not determine pip version ({pip_version}). "
-            "Run 'python3 -m pip install --upgrade pip' first.",
-            file=sys.stderr,
-        )
-        return False
-    if parsed <= (22, 0, 2):
-        print(
-            f"botsdock connector upgrade: pip > 22.0.2 is required, found {pip_version}. "
-            "Run 'python3 -m pip install --upgrade pip' first.",
-            file=sys.stderr,
-        )
-        return False
-    return True
-
-
-def _upgrade_spec_with_version(spec: str, version: str | None) -> str:
-    if not version:
-        return spec
-    if spec.startswith("git+"):
-        base = spec.rsplit("@", 1)[0] if "@" in spec.rsplit("/", 1)[-1] else spec
-        return f"{base}@{version}"
-    return f"{spec}=={version}"
-
-
-
-def build_upgrade_pip_args(args: argparse.Namespace) -> list[str]:
-    package_spec = args.package_spec
-    if not package_spec:
-        package_spec = GITHUB_UPGRADE_SPEC if args.source == "github" else PYPI_UPGRADE_SPEC
-    package_spec = _upgrade_spec_with_version(str(package_spec), args.version)
-    command = [sys.executable, "-m", "pip", "install", "--upgrade"]
-    if args.user:
-        command.append("--user")
-    if args.pre:
-        command.append("--pre")
-    if args.force_reinstall:
-        command.append("--force-reinstall")
-    command.extend(str(item) for item in (args.pip_arg or []))
-    command.append(package_spec)
-    return command
-
-
-def _get_installed_version() -> str | None:
-    try:
-        return importlib.metadata.version("botsdock-connector")
-    except importlib.metadata.PackageNotFoundError:
-        return None
-
-
-def _get_package_version_via_subprocess() -> str | None:
-    """Read installed version via a fresh subprocess, avoiding importlib caches."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c",
-             "from importlib.metadata import version; print(version('botsdock-connector'))"],
-            capture_output=True, text=True,
-        )
-        return result.stdout.strip() or None
-    except (subprocess.SubprocessError, OSError):
-        return None
-
-
-def run_upgrade(args: argparse.Namespace) -> int:
-    if not _check_pip_version():
-        return 1
-    if args.user and sys.prefix != sys.base_prefix:
-        print(
-            "botsdock connector upgrade: warning: --user is set but running inside "
-            "a virtual environment. The package may install to the user site instead "
-            "of the venv, which is rarely what you want. Consider dropping --user.",
-            file=sys.stderr,
-        )
-
-    old_version = _get_installed_version()
-    if old_version:
-        print(f"Current botsdock-connector version: {old_version}", file=sys.stderr)
-    else:
-        print("botsdock-connector is not currently installed.", file=sys.stderr)
-
-    command = build_upgrade_pip_args(args)
-    printable = " ".join(shlex.quote(part) for part in command)
-    print(f"botsdock connector upgrade command: {printable}", file=sys.stderr)
-    if args.dry_run:
-        return 0
-    result = subprocess.run(command)
-    if result.returncode == 0:
-        new_version = _get_package_version_via_subprocess()
-        if new_version:
-            if old_version and old_version != new_version:
-                print(
-                    f"botsdock connector upgraded: {old_version} -> {new_version}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"botsdock connector version {new_version} installed.",
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                "botsdock connector upgrade finished. Restart botsdock-connector to use the new version.",
-                file=sys.stderr,
-            )
-    return result.returncode
-
+# ---------------------------------------------------------------------------
+# Runtime profile helpers
+# ---------------------------------------------------------------------------
 
 def normalize_runtime_profile_id(value: Any) -> str:
     text = str(value or "").strip()
@@ -366,7 +273,7 @@ def load_env_file(path: str | None) -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
-            line = line[len("export ") :].strip()
+            line = line[len("export "):].strip()
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
@@ -378,491 +285,9 @@ def load_env_file(path: str | None) -> dict[str, str]:
     return loaded
 
 
-def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) -> JsonDict:
-    hello: JsonDict = {
-        "type": "connector.hello",
-        "provider": provider.name,
-        "connector_version": connector_version,
-        "platform": sys.platform,
-        "hostname": socket.gethostname(),
-        "protocol_version": "0.1",
-        "connection_mode": "remote_ws",
-        "capabilities": [
-            "app_server.thread_start",
-            "app_server.thread_resume",
-            "app_server.thread_archive",
-            "app_server.thread_unarchive",
-            "app_server.thread_delete",
-            "app_server.turn_start",
-            "app_server.turn_cancel",
-            "app_server.approval_respond",
-            "connector.sync_snapshot",
-            "connector.thread_history",
-            "workspace.report",
-            "thread.sync",
-        ],
-        "provider_runtime": {
-            "name": provider.name,
-            "active_runtime_profile_id": provider.active_runtime_profile_id,
-            "capabilities": {
-                "can_resume_session": provider.capabilities.can_resume_session,
-                "can_cancel_turn": provider.capabilities.can_cancel_turn,
-                "can_request_approval": provider.capabilities.can_request_approval,
-                "can_report_file_activity": provider.capabilities.can_report_file_activity,
-                "event_types": list(provider.capabilities.event_types),
-            },
-        },
-    }
-    runtime_profiles = provider.runtime_profiles()
-    if runtime_profiles:
-        hello["runtime_profiles"] = runtime_profiles
-        hello["active_runtime_profile_id"] = provider.active_runtime_profile_id
-    return hello
-
-
-def _runtime_profile_log_line(profile: JsonDict) -> str:
-    keys = profile.get("env_keys") if isinstance(profile.get("env_keys"), list) else []
-    visible_keys = [str(key) for key in keys[:16]]
-    if len(keys) > len(visible_keys):
-        visible_keys.append(f"+{len(keys) - len(visible_keys)} more")
-    env_keys = ",".join(visible_keys) if visible_keys else "none"
-    env_file = "configured" if profile.get("env_file_configured") else "none"
-    model = profile.get("model") or "cli_default"
-    model_source = profile.get("model_source") or "unknown"
-    return (
-        "botsdock connector claude runtime: "
-        f"profile={profile.get('id') or DEFAULT_RUNTIME_PROFILE_ID} "
-        f"auth_source={profile.get('auth_source') or 'unknown'} "
-        f"cli={profile.get('cli_label') or 'sdk_default'} "
-        f"model={model} model_source={model_source} env_file={env_file} env_keys={env_keys}"
-    )
-
-
-def _should_warn_missing_claude_env(profile: JsonDict) -> bool:
-    return not profile.get("has_claude_auth_env") and not profile.get("env_file_configured")
-
-
-def workspace_report(cwd: str) -> JsonDict:
-    path = str(Path(cwd).expanduser().resolve())
-    return {
-        "type": "workspace.report",
-        "workspaces": [
-            {
-                "name": Path(path).name or path,
-                "path": path,
-            }
-        ],
-    }
-
-
-def empty_thread_sync_report() -> JsonDict:
-    return {"type": "thread.sync", "threads": [], "workspaces": []}
-
-
-def _list_from_message(message: JsonDict, key: str) -> list[Any]:
-    value = message.get(key)
-    if isinstance(value, list):
-        return value
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-    value = payload.get(key)
-    return value if isinstance(value, list) else []
-
-
-def _message_provider(message: JsonDict) -> str | None:
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-    value = message.get("provider") or payload.get("provider")
-    if isinstance(value, str) and value:
-        return value
-    for item in [*_list_from_message(message, "threads"), *_list_from_message(message, "workspaces")]:
-        if isinstance(item, dict):
-            provider = item.get("provider")
-            if isinstance(provider, str) and provider:
-                return provider
-    return None
-
-
-def _tag_provider_message(message: JsonDict, provider: str) -> JsonDict:
-    tagged = dict(message)
-    tagged["provider"] = provider
-    payload = tagged.get("payload")
-    if isinstance(payload, dict):
-        payload = dict(payload)
-        payload.setdefault("provider", provider)
-        tagged["payload"] = payload
-    for key in ("threads", "workspaces"):
-        items = tagged.get(key)
-        if isinstance(items, list):
-            tagged[key] = [
-                {**item, "provider": item.get("provider") or provider}
-                if isinstance(item, dict)
-                else item
-                for item in items
-            ]
-    return tagged
-
-
-def _capabilities_from_hello(hello: JsonDict) -> list[str]:
-    raw = hello.get("capabilities")
-    if not isinstance(raw, list):
-        return []
-    return [str(item) for item in raw if item is not None]
-
-
-def _provider_runtime_from_hello(
-    hello: JsonDict,
-    *,
-    provider: str,
-    display_name: str,
-    runtime: str,
-    version: str | None = None,
-) -> JsonDict:
-    runtime_profiles = hello.get("runtime_profiles")
-    if not isinstance(runtime_profiles, list):
-        runtime_profiles = []
-    return {
-        "provider": provider,
-        "display_name": display_name,
-        "runtime": runtime,
-        "version": version,
-        "active_runtime_profile_id": hello.get("active_runtime_profile_id"),
-        "capabilities": _capabilities_from_hello(hello),
-        "runtime_profiles": runtime_profiles,
-    }
-
-
-def _agent_hello(provider_runtimes: list[JsonDict], *, connector_version: str) -> JsonDict:
-    capabilities = sorted(
-        {
-            "provider.runtime_mux",
-            *(
-                str(capability)
-                for runtime in provider_runtimes
-                for capability in runtime.get("capabilities", [])
-            ),
-        }
-    )
-    runtime_profiles = [
-        profile
-        for runtime in provider_runtimes
-        for profile in runtime.get("runtime_profiles", [])
-        if isinstance(profile, dict)
-    ]
-    hello: JsonDict = {
-        "type": "connector.hello",
-        "provider": CONNECTOR_MACHINE_PROVIDER,
-        "connector_version": connector_version,
-        "platform": sys.platform,
-        "hostname": socket.gethostname(),
-        "protocol_version": "0.1",
-        "connection_mode": "remote_ws",
-        "capabilities": capabilities,
-        "provider_runtimes": provider_runtimes,
-    }
-    if runtime_profiles:
-        hello["runtime_profiles"] = runtime_profiles
-    for runtime in provider_runtimes:
-        if runtime.get("provider") == CODEX_AGENT_PROVIDER and runtime.get("app_server"):
-            hello["app_server"] = runtime["app_server"]
-            break
-    return hello
-
-
-def ok_response(request_id: Any, payload: JsonDict | None = None) -> JsonDict:
-    return {
-        "type": "connector.response",
-        "request_id": request_id,
-        "status": "ok",
-        "payload": payload or {},
-    }
-
-
-def error_response(request_id: Any, code: str, message: str) -> JsonDict:
-    return {
-        "type": "connector.response",
-        "request_id": request_id,
-        "status": "error",
-        "error": {"code": code, "message": message},
-    }
-
-
-def envelope_to_backend_message(
-    envelope,
-    request: JsonDict,
-    *,
-    request_id: str | None = None,
-) -> JsonDict:
-    payload = dict(envelope.payload or {})
-    provider = payload.get("provider") or request.get("provider")
-    thread_id = payload.get("thread_id") or request.get("thread_id")
-    turn_id = payload.get("turn_id") or request.get("turn_id")
-    return {
-        "type": "app_server.event",
-        "provider": provider,
-        "event_type": envelope.type,
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "request_id": request_id,
-        "provider_event_id": envelope.provider_event_id,
-        "provider_thread_id": envelope.provider_thread_id,
-        "provider_turn_id": envelope.provider_turn_id,
-        "provider_session_id": envelope.provider_session_id,
-        "payload": {
-            **payload,
-            "provider": provider,
-            "thread_id": thread_id,
-            "turn_id": turn_id,
-            "provider_event_id": envelope.provider_event_id,
-            "provider_thread_id": envelope.provider_thread_id,
-            "provider_turn_id": envelope.provider_turn_id,
-            "provider_session_id": envelope.provider_session_id,
-        },
-        "raw_provider_event": envelope.raw_event,
-    }
-
-
-def approval_envelope_to_request_opened(envelope, request: JsonDict) -> JsonDict | None:
-    payload = dict(envelope.payload or {})
-    provider = payload.get("provider") or request.get("provider")
-    app_server_request_id = (
-        payload.get("app_server_request_id")
-        or payload.get("request_id")
-        or payload.get("provider_request_id")
-    )
-    if app_server_request_id is None:
-        return None
-    app_server_request_id = str(app_server_request_id)
-    method = (
-        payload.get("approval_method")
-        or payload.get("method")
-        or "item/commandExecution/requestApproval"
-    )
-    app_server_thread_id = (
-        payload.get("app_server_thread_id")
-        or payload.get("appServerThreadId")
-        or request.get("app_server_thread_id")
-        or request.get("provider_thread_id")
-        or request.get("thread_id")
-    )
-    app_server_turn_id = (
-        payload.get("app_server_turn_id")
-        or payload.get("appServerTurnId")
-        or request.get("app_server_turn_id")
-        or request.get("provider_turn_id")
-        or request.get("turn_id")
-    )
-    if app_server_thread_id is None:
-        return None
-    command = payload.get("command")
-    if isinstance(command, str) and command:
-        payload.setdefault("command_preview", command)
-    payload.setdefault("request_id", app_server_request_id)
-    payload.setdefault("app_server_request_id", app_server_request_id)
-    payload.setdefault("app_server_thread_id", str(app_server_thread_id))
-    if app_server_turn_id is not None:
-        payload.setdefault("app_server_turn_id", str(app_server_turn_id))
-    payload.setdefault("approval_method", method)
-    payload.setdefault("available_decisions", ["accept", "decline", "cancel"])
-    return {
-        "type": "app_server.request_opened",
-        "provider": provider,
-        "kind": "approval",
-        "method": method,
-        "thread_id": request.get("thread_id") or payload.get("thread_id"),
-        "turn_id": request.get("turn_id") or payload.get("turn_id"),
-        "app_server_thread_id": str(app_server_thread_id),
-        "app_server_turn_id": str(app_server_turn_id)
-        if app_server_turn_id is not None
-        else None,
-        "app_server_request_id": app_server_request_id,
-        "request_fingerprint": payload.get("request_fingerprint"),
-        "payload": payload,
-        "raw_payload": envelope.raw_event,
-    }
-
-
-class ClaudeCodeConnector:
-    def __init__(self, *, provider: ClaudeAgentSdkProvider, outbound: asyncio.Queue[JsonDict]) -> None:
-        self.provider = provider
-        self.outbound = outbound
-        self._turn_tasks: dict[str, asyncio.Task[None]] = {}
-
-    async def handle_backend_message(self, message: JsonDict) -> JsonDict | None:
-        msg_type = message.get("type")
-        request_id = message.get("request_id")
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-        if msg_type == "app_server.turn_start":
-            turn_id = str(payload.get("turn_id") or request_id)
-            print(
-                "botsdock connector claude turn start: "
-                f"thread={payload.get('thread_id')} turn={turn_id} "
-                f"cwd={payload.get('cwd')} session={payload.get('provider_session_id')}",
-                file=sys.stderr,
-            )
-            task = asyncio.create_task(self._run_turn(payload, request_id=request_id))
-            self._turn_tasks[turn_id] = task
-            task.add_done_callback(lambda done, key=turn_id: self._turn_tasks.pop(key, None))
-            return ok_response(
-                request_id,
-                {"accepted": True, "provider": self.provider.name, "turn_id": turn_id},
-            )
-        if msg_type == "app_server.turn_steer":
-            return error_response(
-                request_id,
-                "unsupported_request",
-                "Claude Code connector does not support steering an active turn yet",
-            )
-        if msg_type == "app_server.turn_cancel":
-            envelope = await self.provider.cancel_turn(payload)
-            await self.outbound.put(
-                envelope_to_backend_message(envelope, payload, request_id=request_id)
-            )
-            return ok_response(request_id, {"cancelled": True})
-        if msg_type == "app_server.approval_respond":
-            envelope = await self.provider.resolve_approval(payload)
-            await self.outbound.put(
-                envelope_to_backend_message(envelope, payload, request_id=request_id)
-            )
-            return ok_response(request_id, {"resolved": True})
-        if msg_type == "app_server.thread_resume":
-            return ok_response(
-                request_id,
-                {
-                    "resumed": True,
-                    "provider": self.provider.name,
-                    "provider_session_id": payload.get("provider_session_id"),
-                },
-            )
-        if msg_type == "app_server.thread_archive":
-            return ok_response(
-                request_id,
-                {
-                    "archived": True,
-                    "provider": self.provider.name,
-                    "provider_session_id": payload.get("provider_session_id"),
-                    "local_only": True,
-                },
-            )
-        if msg_type == "app_server.thread_unarchive":
-            return ok_response(
-                request_id,
-                {
-                    "unarchived": True,
-                    "provider": self.provider.name,
-                    "provider_session_id": payload.get("provider_session_id"),
-                    "local_only": True,
-                },
-            )
-        if msg_type == "app_server.thread_delete":
-            try:
-                return ok_response(request_id, self.provider.delete_thread(payload))
-            except Exception as exc:
-                return error_response(
-                    request_id,
-                    "thread_delete_failed",
-                    str(exc) or type(exc).__name__,
-                )
-        if msg_type == "connector.sync_snapshot":
-            return ok_response(request_id, self.provider.thread_sync_report())
-        if msg_type == "connector.thread_history":
-            return ok_response(request_id, self.provider.read_thread_history(payload))
-        if msg_type == "app_server.account_snapshot":
-            return ok_response(
-                request_id,
-                {
-                    "provider": self.provider.name,
-                    "runtime": "claude_agent_sdk",
-                    "cwd": self.provider.cwd,
-                    "runtime_profile": self.provider.runtime_profile_report(),
-                },
-            )
-        if msg_type in {
-            "thread.sync_ack",
-            "workspace.report_ack",
-            "connector.event_ack",
-            "connector.transient_ack",
-            "connector.heartbeat_ack",
-            "app_server.request_opened_ack",
-        }:
-            return None
-        if request_id is not None:
-            return error_response(
-                request_id,
-                "unsupported_request",
-                f"unsupported backend request type: {msg_type}",
-            )
-        return None
-
-    async def _run_turn(self, request: JsonDict, *, request_id: str | None) -> None:
-        async for envelope in self.provider.start_turn(request):
-            if envelope.type == "approval.requested":
-                opened = approval_envelope_to_request_opened(envelope, request)
-                if opened is not None:
-                    print(
-                        "botsdock connector claude approval requested: "
-                        f"thread={request.get('thread_id')} turn={request.get('turn_id')} "
-                        f"request={opened.get('app_server_request_id')} "
-                        f"method={opened.get('method')}",
-                        file=sys.stderr,
-                    )
-                    await self.outbound.put(opened)
-                    continue
-            if envelope.type in {"turn.completed", "turn.failed", "turn.cancelled"}:
-                payload = envelope.payload or {}
-                error = payload.get("error")
-                if isinstance(error, dict):
-                    error_text = error.get("message") or error.get("code")
-                else:
-                    error_text = error
-                print(
-                    "botsdock connector claude turn terminal: "
-                    f"type={envelope.type} thread={request.get('thread_id')} "
-                    f"turn={request.get('turn_id')} session={payload.get('provider_session_id')}"
-                    f"{' error=' + str(error_text)[:120] if error_text else ''}",
-                    file=sys.stderr,
-                )
-            await self.outbound.put(
-                envelope_to_backend_message(
-                    envelope,
-                    request,
-                    request_id=request_id,
-                )
-            )
-
-    async def stop(self) -> None:
-        for task in list(self._turn_tasks.values()):
-            task.cancel()
-        for task in list(self._turn_tasks.values()):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        await self.provider.stop()
-
-
-def reconnect_command(args: argparse.Namespace) -> str:
-    parts = ["botsdock-connector"]
-    if args.server.rstrip("/") != DEFAULT_SERVER:
-        parts.extend(["--server", args.server])
-    if args.cwd and args.cwd != ".":
-        parts.extend(["--cwd", args.cwd])
-    runtime_profile_id = normalize_runtime_profile_id(
-        getattr(args, "runtime_profile_id", None) or getattr(args, "runtime_profile", None)
-    )
-    if runtime_profile_id != DEFAULT_RUNTIME_PROFILE_ID:
-        parts.extend(["--runtime-profile", runtime_profile_id])
-    runtime_profile_name = getattr(args, "runtime_profile_name", None)
-    if runtime_profile_name:
-        parts.extend(["--runtime-profile-name", runtime_profile_name])
-    env_file = getattr(args, "env_file", None)
-    if env_file:
-        parts.extend(["--env-file", env_file])
-    claude_bin = getattr(args, "claude_bin", None)
-    if claude_bin:
-        parts.extend(["--claude-bin", claude_bin])
-    if getattr(args, "model", None):
-        parts.extend(["--model", args.model])
-    return " ".join(shlex.quote(str(part)) for part in parts)
-
+# ---------------------------------------------------------------------------
+# Connection spec resolution
+# ---------------------------------------------------------------------------
 
 def connector_cwd(args: argparse.Namespace) -> str:
     return str(Path(args.cwd or ".").expanduser().resolve())
@@ -1047,6 +472,477 @@ def connection_label(spec: ConnectionSpec) -> str:
     return f"machine={spec.machine_id}{provider}{profile}"
 
 
+# ---------------------------------------------------------------------------
+# Protocol message helpers
+# ---------------------------------------------------------------------------
+
+def provider_hello(provider: ClaudeAgentSdkProvider, *, connector_version: str) -> JsonDict:
+    hello: JsonDict = {
+        "type": "connector.hello",
+        "provider": provider.name,
+        "connector_version": connector_version,
+        "platform": sys.platform,
+        "hostname": socket.gethostname(),
+        "protocol_version": PROTOCOL_VERSION,
+        "connection_mode": CONNECTION_MODE,
+        "capabilities": [
+            "app_server.thread_start",
+            "app_server.thread_resume",
+            "app_server.thread_archive",
+            "app_server.thread_unarchive",
+            "app_server.thread_delete",
+            "app_server.turn_start",
+            "app_server.turn_cancel",
+            "app_server.approval_respond",
+            "connector.sync_snapshot",
+            "connector.thread_history",
+            "workspace.report",
+            "thread.sync",
+        ],
+        "provider_runtime": {
+            "name": provider.name,
+            "active_runtime_profile_id": provider.active_runtime_profile_id,
+            "capabilities": {
+                "can_resume_session": provider.capabilities.can_resume_session,
+                "can_cancel_turn": provider.capabilities.can_cancel_turn,
+                "can_request_approval": provider.capabilities.can_request_approval,
+                "can_report_file_activity": provider.capabilities.can_report_file_activity,
+                "event_types": list(provider.capabilities.event_types),
+            },
+        },
+    }
+    runtime_profiles = provider.runtime_profiles()
+    if runtime_profiles:
+        hello["runtime_profiles"] = runtime_profiles
+        hello["active_runtime_profile_id"] = provider.active_runtime_profile_id
+    return hello
+
+
+def _capabilities_from_hello(hello: JsonDict) -> list[str]:
+    raw = hello.get("capabilities")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if item is not None]
+
+
+def _provider_runtime_from_hello(
+    hello: JsonDict,
+    *,
+    provider: str,
+    display_name: str,
+    runtime: str,
+    version: str | None = None,
+) -> JsonDict:
+    runtime_profiles = hello.get("runtime_profiles")
+    if not isinstance(runtime_profiles, list):
+        runtime_profiles = []
+    return {
+        "provider": provider,
+        "display_name": display_name,
+        "runtime": runtime,
+        "version": version,
+        "active_runtime_profile_id": hello.get("active_runtime_profile_id"),
+        "capabilities": _capabilities_from_hello(hello),
+        "runtime_profiles": runtime_profiles,
+    }
+
+
+def _agent_hello(provider_runtimes: list[JsonDict], *, connector_version: str) -> JsonDict:
+    capabilities = sorted(
+        {
+            "provider.runtime_mux",
+            *(
+                str(capability)
+                for runtime in provider_runtimes
+                for capability in runtime.get("capabilities", [])
+            ),
+        }
+    )
+    runtime_profiles = [
+        profile
+        for runtime in provider_runtimes
+        for profile in runtime.get("runtime_profiles", [])
+        if isinstance(profile, dict)
+    ]
+    hello: JsonDict = {
+        "type": "connector.hello",
+        "provider": CONNECTOR_MACHINE_PROVIDER,
+        "connector_version": connector_version,
+        "platform": sys.platform,
+        "hostname": socket.gethostname(),
+        "protocol_version": PROTOCOL_VERSION,
+        "connection_mode": CONNECTION_MODE,
+        "capabilities": capabilities,
+        "provider_runtimes": provider_runtimes,
+    }
+    if runtime_profiles:
+        hello["runtime_profiles"] = runtime_profiles
+    for runtime in provider_runtimes:
+        if runtime.get("provider") == CODEX_AGENT_PROVIDER and runtime.get("app_server"):
+            hello["app_server"] = runtime["app_server"]
+            break
+    return hello
+
+
+def ok_response(request_id: Any, payload: JsonDict | None = None) -> JsonDict:
+    return {
+        "type": "connector.response",
+        "request_id": request_id,
+        "status": "ok",
+        "payload": payload or {},
+    }
+
+
+def error_response(request_id: Any, code: str, message: str) -> JsonDict:
+    return {
+        "type": "connector.response",
+        "request_id": request_id,
+        "status": "error",
+        "error": {"code": code, "message": message},
+    }
+
+
+def envelope_to_backend_message(
+    envelope,
+    request: JsonDict,
+    *,
+    request_id: str | None = None,
+) -> JsonDict:
+    payload = dict(envelope.payload or {})
+    provider = payload.get("provider") or request.get("provider")
+    thread_id = payload.get("thread_id") or request.get("thread_id")
+    turn_id = payload.get("turn_id") or request.get("turn_id")
+    return {
+        "type": "app_server.event",
+        "provider": provider,
+        "event_type": envelope.type,
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "request_id": request_id,
+        "provider_event_id": envelope.provider_event_id,
+        "provider_thread_id": envelope.provider_thread_id,
+        "provider_turn_id": envelope.provider_turn_id,
+        "provider_session_id": envelope.provider_session_id,
+        "payload": {
+            **payload,
+            "provider": provider,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "provider_event_id": envelope.provider_event_id,
+            "provider_thread_id": envelope.provider_thread_id,
+            "provider_turn_id": envelope.provider_turn_id,
+            "provider_session_id": envelope.provider_session_id,
+        },
+        "raw_provider_event": envelope.raw_event,
+    }
+
+
+def approval_envelope_to_request_opened(envelope, request: JsonDict) -> JsonDict | None:
+    payload = dict(envelope.payload or {})
+    provider = payload.get("provider") or request.get("provider")
+    app_server_request_id = (
+        payload.get("app_server_request_id")
+        or payload.get("request_id")
+        or payload.get("provider_request_id")
+    )
+    if app_server_request_id is None:
+        return None
+    app_server_request_id = str(app_server_request_id)
+    method = (
+        payload.get("approval_method")
+        or payload.get("method")
+        or "item/commandExecution/requestApproval"
+    )
+    app_server_thread_id = (
+        payload.get("app_server_thread_id")
+        or payload.get("appServerThreadId")
+        or request.get("app_server_thread_id")
+        or request.get("provider_thread_id")
+        or request.get("thread_id")
+    )
+    app_server_turn_id = (
+        payload.get("app_server_turn_id")
+        or payload.get("appServerTurnId")
+        or request.get("app_server_turn_id")
+        or request.get("provider_turn_id")
+        or request.get("turn_id")
+    )
+    if app_server_thread_id is None:
+        return None
+    command = payload.get("command")
+    if isinstance(command, str) and command:
+        payload.setdefault("command_preview", command)
+    payload.setdefault("request_id", app_server_request_id)
+    payload.setdefault("app_server_request_id", app_server_request_id)
+    payload.setdefault("app_server_thread_id", str(app_server_thread_id))
+    if app_server_turn_id is not None:
+        payload.setdefault("app_server_turn_id", str(app_server_turn_id))
+    payload.setdefault("approval_method", method)
+    payload.setdefault("available_decisions", ["accept", "decline", "cancel"])
+    return {
+        "type": "app_server.request_opened",
+        "provider": provider,
+        "kind": "approval",
+        "method": method,
+        "thread_id": request.get("thread_id") or payload.get("thread_id"),
+        "turn_id": request.get("turn_id") or payload.get("turn_id"),
+        "app_server_thread_id": str(app_server_thread_id),
+        "app_server_turn_id": str(app_server_turn_id)
+        if app_server_turn_id is not None
+        else None,
+        "app_server_request_id": app_server_request_id,
+        "request_fingerprint": payload.get("request_fingerprint"),
+        "payload": payload,
+        "raw_payload": envelope.raw_event,
+    }
+
+
+def workspace_report(cwd: str) -> JsonDict:
+    path = str(Path(cwd).expanduser().resolve())
+    return {
+        "type": "workspace.report",
+        "workspaces": [
+            {
+                "name": Path(path).name or path,
+                "path": path,
+            }
+        ],
+    }
+
+
+def _list_from_message(message: JsonDict, key: str) -> list[Any]:
+    value = message.get(key)
+    if isinstance(value, list):
+        return value
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    value = payload.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _message_provider(message: JsonDict) -> str | None:
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    value = message.get("provider") or payload.get("provider")
+    if isinstance(value, str) and value:
+        return value
+    for item in [*_list_from_message(message, "threads"), *_list_from_message(message, "workspaces")]:
+        if isinstance(item, dict):
+            provider = item.get("provider")
+            if isinstance(provider, str) and provider:
+                return provider
+    return None
+
+
+def _tag_provider_message(message: JsonDict, provider: str) -> JsonDict:
+    tagged = dict(message)
+    tagged["provider"] = provider
+    payload = tagged.get("payload")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("provider", provider)
+        tagged["payload"] = payload
+    for key in ("threads", "workspaces"):
+        items = tagged.get(key)
+        if isinstance(items, list):
+            tagged[key] = [
+                {**item, "provider": item.get("provider") or provider}
+                if isinstance(item, dict)
+                else item
+                for item in items
+            ]
+    return tagged
+
+
+def reconnect_command(args: argparse.Namespace) -> str:
+    parts = ["botsdock-connector"]
+    if args.server.rstrip("/") != DEFAULT_SERVER:
+        parts.extend(["--server", args.server])
+    if args.cwd and args.cwd != ".":
+        parts.extend(["--cwd", args.cwd])
+    runtime_profile_id = normalize_runtime_profile_id(
+        getattr(args, "runtime_profile_id", None) or getattr(args, "runtime_profile", None)
+    )
+    if runtime_profile_id != DEFAULT_RUNTIME_PROFILE_ID:
+        parts.extend(["--runtime-profile", runtime_profile_id])
+    runtime_profile_name = getattr(args, "runtime_profile_name", None)
+    if runtime_profile_name:
+        parts.extend(["--runtime-profile-name", runtime_profile_name])
+    env_file = getattr(args, "env_file", None)
+    if env_file:
+        parts.extend(["--env-file", env_file])
+    claude_bin = getattr(args, "claude_bin", None)
+    if claude_bin:
+        parts.extend(["--claude-bin", claude_bin])
+    if getattr(args, "model", None):
+        parts.extend(["--model", args.model])
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeConnector
+# ---------------------------------------------------------------------------
+
+class ClaudeCodeConnector:
+    def __init__(self, *, provider: ClaudeAgentSdkProvider, outbound: asyncio.Queue[JsonDict]) -> None:
+        self.provider = provider
+        self.outbound = outbound
+        self._turn_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def handle_backend_message(self, message: JsonDict) -> JsonDict | None:
+        msg_type = message.get("type")
+        request_id = message.get("request_id")
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        if msg_type == "app_server.turn_start":
+            turn_id = str(payload.get("turn_id") or request_id)
+            logger.info(
+                "claude turn start: thread=%s turn=%s cwd=%s session=%s",
+                payload.get("thread_id"), turn_id,
+                payload.get("cwd"), payload.get("provider_session_id"),
+            )
+            task = asyncio.create_task(self._run_turn(payload, request_id=request_id))
+            self._turn_tasks[turn_id] = task
+            task.add_done_callback(lambda done, key=turn_id: self._turn_tasks.pop(key, None))
+            return ok_response(
+                request_id,
+                {"accepted": True, "provider": self.provider.name, "turn_id": turn_id},
+            )
+        if msg_type == "app_server.turn_steer":
+            return error_response(
+                request_id,
+                "unsupported_request",
+                "Claude Code connector does not support steering an active turn yet",
+            )
+        if msg_type == "app_server.turn_cancel":
+            envelope = await self.provider.cancel_turn(payload)
+            await self.outbound.put(
+                envelope_to_backend_message(envelope, payload, request_id=request_id)
+            )
+            return ok_response(request_id, {"cancelled": True})
+        if msg_type == "app_server.approval_respond":
+            envelope = await self.provider.resolve_approval(payload)
+            await self.outbound.put(
+                envelope_to_backend_message(envelope, payload, request_id=request_id)
+            )
+            return ok_response(request_id, {"resolved": True})
+        if msg_type == "app_server.thread_resume":
+            return ok_response(
+                request_id,
+                {
+                    "resumed": True,
+                    "provider": self.provider.name,
+                    "provider_session_id": payload.get("provider_session_id"),
+                },
+            )
+        if msg_type == "app_server.thread_archive":
+            return ok_response(
+                request_id,
+                {
+                    "archived": True,
+                    "provider": self.provider.name,
+                    "provider_session_id": payload.get("provider_session_id"),
+                    "local_only": True,
+                },
+            )
+        if msg_type == "app_server.thread_unarchive":
+            return ok_response(
+                request_id,
+                {
+                    "unarchived": True,
+                    "provider": self.provider.name,
+                    "provider_session_id": payload.get("provider_session_id"),
+                    "local_only": True,
+                },
+            )
+        if msg_type == "app_server.thread_delete":
+            try:
+                return ok_response(request_id, self.provider.delete_thread(payload))
+            except Exception as exc:
+                return error_response(
+                    request_id,
+                    "thread_delete_failed",
+                    str(exc) or type(exc).__name__,
+                )
+        if msg_type == "connector.sync_snapshot":
+            return ok_response(request_id, self.provider.thread_sync_report())
+        if msg_type == "connector.thread_history":
+            return ok_response(request_id, self.provider.read_thread_history(payload))
+        if msg_type == "app_server.account_snapshot":
+            return ok_response(
+                request_id,
+                {
+                    "provider": self.provider.name,
+                    "runtime": "claude_agent_sdk",
+                    "cwd": self.provider.cwd,
+                    "runtime_profile": self.provider.runtime_profile_report(),
+                },
+            )
+        if msg_type in {
+            "thread.sync_ack",
+            "workspace.report_ack",
+            "connector.event_ack",
+            "connector.transient_ack",
+            "connector.heartbeat_ack",
+            "app_server.request_opened_ack",
+        }:
+            return None
+        if request_id is not None:
+            return error_response(
+                request_id,
+                "unsupported_request",
+                f"unsupported backend request type: {msg_type}",
+            )
+        return None
+
+    async def _run_turn(self, request: JsonDict, *, request_id: str | None) -> None:
+        async for envelope in self.provider.start_turn(request):
+            if envelope.type == "approval.requested":
+                opened = approval_envelope_to_request_opened(envelope, request)
+                if opened is not None:
+                    logger.info(
+                        "claude approval requested: thread=%s turn=%s request=%s method=%s",
+                        request.get("thread_id"), request.get("turn_id"),
+                        opened.get("app_server_request_id"), opened.get("method"),
+                    )
+                    await self.outbound.put(opened)
+                    continue
+            if envelope.type in {"turn.completed", "turn.failed", "turn.cancelled"}:
+                payload = envelope.payload or {}
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    error_text = error.get("message") or error.get("code")
+                else:
+                    error_text = error
+                logger.info(
+                    "claude turn terminal: type=%s thread=%s turn=%s session=%s%s",
+                    envelope.type, request.get("thread_id"), request.get("turn_id"),
+                    payload.get("provider_session_id"),
+                    f" error={str(error_text)[:120]}" if error_text else "",
+                )
+            await self.outbound.put(
+                envelope_to_backend_message(
+                    envelope,
+                    request,
+                    request_id=request_id,
+                )
+            )
+
+    async def stop(self) -> None:
+        for task in list(self._turn_tasks.values()):
+            task.cancel()
+        for task in list(self._turn_tasks.values()):
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        try:
+            await asyncio.wait_for(self.provider.stop(), timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# AgentConnectorMux
+# ---------------------------------------------------------------------------
+
 class AgentConnectorMux:
     def __init__(self, runtimes: dict[str, JsonDict]) -> None:
         self.runtimes = runtimes
@@ -1087,7 +983,10 @@ class AgentConnectorMux:
         for runtime in self.runtimes.values():
             connector = runtime.get("connector")
             if connector is not None and hasattr(connector, "stop"):
-                await connector.stop()
+                try:
+                    await asyncio.wait_for(connector.stop(), timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    pass
         for runtime in self.runtimes.values():
             app_server = runtime.get("app_server")
             if app_server is not None:
@@ -1147,6 +1046,10 @@ async def _send_initial_runtime_sync(websocket: Any, mux: AgentConnectorMux) -> 
             )
         await websocket.send(json.dumps(tagged_report, separators=(",", ":")))
 
+
+# ---------------------------------------------------------------------------
+# Agent provider session (multi-runtime mux)
+# ---------------------------------------------------------------------------
 
 async def run_agent_provider_session(
     *,
@@ -1218,20 +1121,14 @@ async def run_agent_provider_session(
             codex_app_server.close()
         codex_app_server = None
         codex_connector = None
-        print(f"botsdock connector codex runtime unavailable: {exc}", file=sys.stderr)
+        logger.warning("codex runtime unavailable: %s", exc)
 
     profile_env = load_env_file(getattr(args, "env_file", None))
     if profile_env:
-        print(
-            f"botsdock connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
-            file=sys.stderr,
-        )
+        logger.info("loaded env file: %s (%s key(s))", args.env_file, len(profile_env))
     try:
         if getattr(args, "claude_bin", None):
-            print(
-                f"botsdock connector using Claude CLI: {args.claude_bin}",
-                file=sys.stderr,
-            )
+            logger.info("using Claude CLI: %s", args.claude_bin)
         claude_provider = ClaudeAgentSdkProvider(
             cwd=connector_cwd,
             default_cwd=getattr(args, "default_workspace_cwd", None),
@@ -1247,13 +1144,12 @@ async def run_agent_provider_session(
             approval_timeout_seconds=args.approval_timeout,
         )
         runtime_profile = claude_provider.runtime_profile_report()
-        print(_runtime_profile_log_line(runtime_profile), file=sys.stderr)
+        logger.info(_runtime_profile_log_line(runtime_profile))
         if _should_warn_missing_claude_env(runtime_profile):
-            print(
-                "botsdock connector claude runtime warning: no exported Claude provider env keys detected; "
+            logger.warning(
+                "no exported Claude provider env keys detected; "
                 "if your Claude CLI uses a third-party gateway, start the connector from that exported "
-                "shell or set --env-file ~/.botsdock/botsdock_connector.env",
-                file=sys.stderr,
+                "shell or set --env-file ~/.botsdock/botsdock_connector.env"
             )
         claude_connector = ClaudeCodeConnector(provider=claude_provider, outbound=outbound)
         claude_hello = provider_hello(
@@ -1275,7 +1171,7 @@ async def run_agent_provider_session(
             "provider_object": claude_provider,
         }
     except Exception as exc:
-        print(f"botsdock connector claude runtime unavailable: {exc}", file=sys.stderr)
+        logger.warning("claude runtime unavailable: %s", exc)
 
     if not runtimes:
         raise ConnectorError("no provider runtimes are available")
@@ -1286,76 +1182,83 @@ async def run_agent_provider_session(
     accepted = json.loads(await websocket.recv())
     if accepted.get("type") != "connector.accepted":
         raise ConnectorError(f"connector rejected: {accepted}")
-    await save_accepted_token(
-        accepted=accepted,
-        args=args,
-        machine_id=machine_id,
-        connector_cwd=connector_cwd,
-    )
-    print(
-        "botsdock connector accepted: "
-        f"provider=agent runtimes={','.join(mux.providers())} "
-        f"machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
-        file=sys.stderr,
-    )
-    if getattr(args, "registration_only", False):
-        print(
-            "botsdock connector registration saved; run `botsdock-connector` to start all saved connections",
-            file=sys.stderr,
+
+    async def accepted_handler(accepted_msg: JsonDict) -> None:
+        await save_token(
+            accepted=accepted_msg,
+            args=args,
+            machine_id=machine_id,
+            connector_cwd=connector_cwd,
+            reconnect_command_fn=reconnect_command,
         )
+
+    await accepted_handler(accepted)
+
+    logger.info(
+        "connector accepted: provider=agent runtimes=%s machine=%s session=%s",
+        ",".join(mux.providers()), accepted.get("machine_id"), accepted.get("session_id"),
+    )
+
+    if getattr(args, "registration_only", False):
+        logger.info("registration saved; run `botsdock-connector` to start all saved connections")
         await mux.stop()
         return
 
     await _send_initial_runtime_sync(websocket, mux)
 
-    async def outbound_writer() -> None:
-        while True:
-            message = await outbound.get()
-            provider = _message_provider(message)
-            if provider:
-                message = _tag_provider_message(message, provider)
-            await websocket.send(json.dumps(message, separators=(",", ":")))
+    config = SessionConfig(
+        websocket=websocket,
+        connection_args=args,
+        connector_cwd=connector_cwd,
+        machine_id=machine_id,
+    )
 
-    async def heartbeat_sender() -> None:
-        interval = accepted.get("heartbeat_interval_seconds") or 15
-        try:
-            interval_seconds = max(5, int(interval))
-        except (TypeError, ValueError):
-            interval_seconds = 15
-        while True:
-            await asyncio.sleep(interval_seconds)
-            mux.replay_pending_approvals()
-            await websocket.send(json.dumps({"type": "connector.heartbeat"}, separators=(",", ":")))
-
-    writer_task = asyncio.create_task(outbound_writer())
-    heartbeat_task = asyncio.create_task(heartbeat_sender())
+    heartbeat_interval = 15
     try:
-        async for raw in websocket:
-            message = json.loads(raw)
-            if message.get("type") in {"connector.error", "connection.error"}:
-                print(
-                    f"botsdock connector backend error: {message.get('error') or message}",
-                    file=sys.stderr,
-                )
-                continue
-            response = await mux.handle_backend_message(message)
-            if response is not None:
-                await websocket.send(json.dumps(response, separators=(",", ":")))
+        raw_interval = accepted.get("heartbeat_interval_seconds") or 15
+        heartbeat_interval = max(5, int(raw_interval))
+    except (TypeError, ValueError):
+        heartbeat_interval = 15
+
+    cancelled = asyncio.Event()
+    writer_task = asyncio.create_task(
+        outbound_writer(websocket, outbound, tag_provider_fn=_tag_provider_message, provider_tag=None)
+    )
+    heartbeat_task = asyncio.create_task(
+        heartbeat_sender(
+            websocket,
+            heartbeat_interval_seconds=heartbeat_interval,
+            replay_fn=mux.replay_pending_approvals,
+            cancelled=cancelled,
+        )
+    )
+    try:
+        await message_loop(
+            websocket,
+            handler=mux.handle_backend_message,
+            tag_provider_fn=_tag_provider_message,
+            provider_tag=None,
+        )
     finally:
-        buffered_sender.flush_all()
+        cancelled.set()
+        buffered_sender.close()
         writer_task.cancel()
         heartbeat_task.cancel()
         await mux.stop()
 
+
+# ---------------------------------------------------------------------------
+# Connection runner
+# ---------------------------------------------------------------------------
 
 async def run_connector_once_for_spec(args: argparse.Namespace, spec: ConnectionSpec) -> None:
     import websockets
 
     connection_args = _connection_args(args, spec)
     ws_url = backend_ws_url(spec.server, spec.machine_id)
-    print(
-        f"botsdock connector connecting: server={spec.server.rstrip('/')} machine={spec.machine_id}",
-        file=sys.stderr,
+    logger.info(
+        "connecting: server=%s machine=%s",
+        spec.server.rstrip("/"), spec.machine_id,
     )
     async with websockets.connect(
         ws_url,
@@ -1366,9 +1269,9 @@ async def run_connector_once_for_spec(args: argparse.Namespace, spec: Connection
     ) as websocket:
         bootstrap = await send_bootstrap(websocket, connection_args)
         provider = bootstrap["provider"]
-        print(
-            f"botsdock connector machine provider: {provider} machine={spec.machine_id}",
-            file=sys.stderr,
+        logger.info(
+            "machine provider: %s machine=%s",
+            provider, spec.machine_id,
         )
         await run_agent_provider_session(
             websocket=websocket,
@@ -1376,6 +1279,18 @@ async def run_connector_once_for_spec(args: argparse.Namespace, spec: Connection
             connector_cwd=spec.cwd,
             machine_id=spec.machine_id,
         )
+
+
+def is_non_retriable_connector_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "missing connector token" in message
+        or "missing machine-id" in message
+        or "missing machine id" in message
+        or "connector rejected" in message
+        or "bootstrap rejected" in message
+        or "unsupported machine provider" in message
+    )
 
 
 async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supervised: bool) -> None:
@@ -1387,46 +1302,37 @@ async def run_connection(args: argparse.Namespace, spec: ConnectionSpec, *, supe
         try:
             await run_connector_once_for_spec(args, spec)
             attempt = 0
-            print(
-                f"botsdock connector disconnected; reconnecting {connection_label(spec)}",
-                file=sys.stderr,
+            logger.info(
+                "disconnected; reconnecting %s",
+                connection_label(spec),
             )
         except KeyboardInterrupt:
             raise
         except ConnectorError as exc:
             if is_non_retriable_connector_error(exc):
                 if supervised:
-                    print(
-                        f"botsdock connector stopped {connection_label(spec)}: {exc}",
-                        file=sys.stderr,
-                    )
+                    logger.error("stopped %s: %s", connection_label(spec), exc)
                     return
                 raise
             attempt += 1
-            print(
-                f"botsdock connector connection failed {connection_label(spec)}: {exc}",
-                file=sys.stderr,
-            )
+            logger.error("connection failed %s: %s", connection_label(spec), exc)
         except Exception as exc:
             attempt += 1
-            print(
-                f"botsdock connector connection failed {connection_label(spec)}: {exc}",
-                file=sys.stderr,
-            )
+            logger.error("connection failed %s: %s", connection_label(spec), exc)
 
         base_delay = max(1.0, float(args.reconnect_initial_delay))
         max_delay = max(base_delay, float(args.reconnect_max_delay))
         delay = min(max_delay, base_delay * (2 ** min(attempt, 6)))
         delay = delay * random.uniform(0.75, 1.25)
-        print(
-            f"botsdock connector reconnecting {connection_label(spec)} in {delay:.1f}s",
-            file=sys.stderr,
+        logger.info(
+            "reconnecting %s in %.1fs",
+            connection_label(spec), delay,
         )
         await asyncio.sleep(delay)
 
 
 async def run_supervisor(args: argparse.Namespace, specs: list[ConnectionSpec]) -> None:
-    print(f"botsdock connector supervising {len(specs)} saved connection(s)", file=sys.stderr)
+    logger.info("supervising %s saved connection(s)", len(specs))
     tasks = [
         asyncio.create_task(
             run_connection(args, spec, supervised=len(specs) > 1),
@@ -1443,294 +1349,11 @@ async def run_supervisor(args: argparse.Namespace, specs: list[ConnectionSpec]) 
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def send_bootstrap(websocket: Any, args: argparse.Namespace) -> JsonDict:
-    await websocket.send(
-        json.dumps(
-            {
-                "type": "connector.bootstrap",
-                "connector_version": args.connector_version,
-                "platform": sys.platform,
-                "hostname": socket.gethostname(),
-                "protocol_version": "0.1",
-                "connection_mode": "remote_ws",
-            },
-            separators=(",", ":"),
-        )
-    )
-    response = json.loads(await websocket.recv())
-    if response.get("type") != "connector.bootstrap":
-        raise ConnectorError(f"connector bootstrap rejected: {response}")
-    provider = response.get("provider")
-    if provider not in SUPPORTED_CONNECTOR_PROVIDERS:
-        raise ConnectorError(f"unsupported machine provider: {provider}")
-    return response
-
-
-async def save_accepted_token(
-    *,
-    accepted: JsonDict,
-    args: argparse.Namespace,
-    machine_id: str,
-    connector_cwd: str,
-) -> None:
-    new_connector_token = accepted.get("connector_token")
-    if not isinstance(new_connector_token, str) or not new_connector_token:
-        return
-    args.machine_id = machine_id
-    args.token = new_connector_token
-    provider = accepted.get("provider")
-    spec = getattr(args, "connection_spec", None)
-    if isinstance(spec, ConnectionSpec):
-        spec.token = new_connector_token
-        if isinstance(provider, str) and provider:
-            spec.provider = provider
-    token_path = save_connector_token(
-        server_url=args.server,
-        machine_id=machine_id,
-        token=new_connector_token,
-        provider=provider if isinstance(provider, str) else None,
-        runtime_profile={
-            "id": getattr(args, "runtime_profile_id", None)
-            or getattr(args, "runtime_profile", None),
-            "display_name": getattr(args, "runtime_profile_name", None),
-            "env_file": getattr(args, "env_file", None),
-            "model": getattr(args, "model", None),
-            "claude_bin": getattr(args, "claude_bin", None),
-        },
-        cwd=connector_cwd,
-    )
-    print(f"botsdock connector token saved: {token_path}", file=sys.stderr)
-    print(f"botsdock connector reconnect command: {reconnect_command(args)}", file=sys.stderr)
-
-
-async def run_claude_provider_session(
-    *,
-    websocket: Any,
-    args: argparse.Namespace,
-    connector_cwd: str,
-    machine_id: str,
-) -> None:
-    outbound: asyncio.Queue[JsonDict] = asyncio.Queue()
-    profile_env = load_env_file(getattr(args, "env_file", None))
-    if profile_env:
-        print(
-            f"botsdock connector loaded env file: {args.env_file} ({len(profile_env)} key(s))",
-            file=sys.stderr,
-        )
-    if getattr(args, "claude_bin", None):
-        print(
-            f"botsdock connector using Claude CLI: {args.claude_bin}",
-            file=sys.stderr,
-        )
-    provider = ClaudeAgentSdkProvider(
-        cwd=connector_cwd,
-        default_cwd=getattr(args, "default_workspace_cwd", None),
-        exclude_history_cwds=()
-        if getattr(args, "default_workspace_cwd", None)
-        else (connector_cwd,),
-        model=args.model,
-        cli_path=getattr(args, "claude_bin", None),
-        runtime_profile_id=getattr(args, "runtime_profile_id", DEFAULT_RUNTIME_PROFILE_ID),
-        runtime_profile_name=getattr(args, "runtime_profile_name", None),
-        env_overrides=profile_env,
-        env_file=getattr(args, "env_file", None),
-        approval_timeout_seconds=args.approval_timeout,
-    )
-    runtime_profile = provider.runtime_profile_report()
-    print(_runtime_profile_log_line(runtime_profile), file=sys.stderr)
-    if _should_warn_missing_claude_env(runtime_profile):
-        print(
-            "botsdock connector claude runtime warning: no exported Claude provider env keys detected; "
-            "if your Claude CLI uses a third-party gateway, start the connector from that exported "
-            "shell or set --env-file ~/.botsdock/botsdock_connector.env",
-            file=sys.stderr,
-        )
-    connector = ClaudeCodeConnector(provider=provider, outbound=outbound)
-    hello = provider_hello(provider, connector_version=args.connector_version)
-    await websocket.send(json.dumps(hello, separators=(",", ":")))
-    accepted = json.loads(await websocket.recv())
-    if accepted.get("type") != "connector.accepted":
-        raise ConnectorError(f"connector rejected: {accepted}")
-    await save_accepted_token(
-        accepted=accepted,
-        args=args,
-        machine_id=machine_id,
-        connector_cwd=connector_cwd,
-    )
-    print(
-        f"botsdock connector accepted: provider=claude_code machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
-        file=sys.stderr,
-    )
-    if getattr(args, "registration_only", False):
-        print(
-            "botsdock connector registration saved; run `botsdock-connector` to start all saved connections",
-            file=sys.stderr,
-        )
-        return
-    thread_sync = provider.thread_sync_report()
-    if thread_sync.get("workspaces"):
-        await websocket.send(
-            json.dumps(
-                {"type": "workspace.report", "workspaces": thread_sync["workspaces"]},
-                separators=(",", ":"),
-            )
-        )
-    await websocket.send(json.dumps(thread_sync, separators=(",", ":")))
-
-    async def outbound_writer() -> None:
-        while True:
-            await websocket.send(json.dumps(await outbound.get(), separators=(",", ":")))
-
-    async def heartbeat_sender() -> None:
-        interval = accepted.get("heartbeat_interval_seconds") or 15
-        try:
-            interval_seconds = max(5, int(interval))
-        except (TypeError, ValueError):
-            interval_seconds = 15
-        while True:
-            await asyncio.sleep(interval_seconds)
-            await websocket.send(json.dumps({"type": "connector.heartbeat"}, separators=(",", ":")))
-
-    writer_task = asyncio.create_task(outbound_writer())
-    heartbeat_task = asyncio.create_task(heartbeat_sender())
-    try:
-        async for raw in websocket:
-            message = json.loads(raw)
-            if message.get("type") in {"connector.error", "connection.error"}:
-                print(
-                    f"botsdock connector backend error: {message.get('error') or message}",
-                    file=sys.stderr,
-                )
-                continue
-            response = await connector.handle_backend_message(message)
-            if response is not None:
-                await websocket.send(json.dumps(response, separators=(",", ":")))
-    finally:
-        writer_task.cancel()
-        heartbeat_task.cancel()
-        await connector.stop()
-
-
-async def run_codex_provider_session(
-    *,
-    websocket: Any,
-    args: argparse.Namespace,
-    connector_cwd: str,
-    machine_id: str,
-) -> None:
-    loop = asyncio.get_running_loop()
-    outbound: asyncio.Queue[JsonDict] = asyncio.Queue()
-    buffered_sender = BufferedBackendSender(
-        loop=loop,
-        outbound=outbound,
-        flush_interval=args.delta_flush_interval,
-        max_chars=args.delta_flush_chars,
-    )
-
-    app_server: AppServerProcessClient | None = None
-    connector: CodexConnector | None = None
-    try:
-        def on_appserver_message(message: JsonDict) -> None:
-            if connector is not None:
-                connector.handle_appserver_message(message)
-
-        app_server = AppServerProcessClient(
-            codex_bin=args.codex_bin,
-            cwd=connector_cwd,
-            timeout=args.timeout,
-            on_message=on_appserver_message,
-        )
-        connector = CodexConnector(app_server=app_server, cwd=connector_cwd, model=args.model)
-        connector.bind_backend_sender(buffered_sender.send)
-        init_result = connector.initialize_app_server()
-        hello = connector.hello(connector_version=args.connector_version)
-        hello["connector_version"] = args.connector_version
-        hello["app_server"]["version"] = _version_label(init_result.get("userAgent"))
-        await websocket.send(json.dumps(hello, separators=(",", ":")))
-        accepted = json.loads(await websocket.recv())
-        if accepted.get("type") != "connector.accepted":
-            raise ConnectorError(f"connector rejected: {accepted}")
-        await save_accepted_token(
-            accepted=accepted,
-            args=args,
-            machine_id=machine_id,
-            connector_cwd=connector_cwd,
-        )
-        print(
-            f"botsdock connector accepted: provider=codex machine={accepted.get('machine_id')} session={accepted.get('session_id')}",
-            file=sys.stderr,
-        )
-        if getattr(args, "registration_only", False):
-            print(
-                "botsdock connector registration saved; run `botsdock-connector` to start all saved connections",
-                file=sys.stderr,
-            )
-            return
-        thread_sync = connector.thread_sync_report()
-        if thread_sync.get("workspaces"):
-            await websocket.send(
-                json.dumps(
-                    {"type": "workspace.report", "workspaces": thread_sync["workspaces"]},
-                    separators=(",", ":"),
-                )
-            )
-        await websocket.send(json.dumps(thread_sync, separators=(",", ":")))
-
-        async def outbound_writer() -> None:
-            while True:
-                await websocket.send(json.dumps(await outbound.get(), separators=(",", ":")))
-
-        async def heartbeat_sender() -> None:
-            interval = accepted.get("heartbeat_interval_seconds") or 15
-            try:
-                interval_seconds = max(5, int(interval))
-            except (TypeError, ValueError):
-                interval_seconds = 15
-            while True:
-                await asyncio.sleep(interval_seconds)
-                connector.replay_pending_approvals()
-                await websocket.send(json.dumps({"type": "connector.heartbeat"}, separators=(",", ":")))
-
-        writer_task = asyncio.create_task(outbound_writer())
-        heartbeat_task = asyncio.create_task(heartbeat_sender())
-        try:
-            async for raw in websocket:
-                message = json.loads(raw)
-                if message.get("type") in {"connector.error", "connection.error"}:
-                    print(
-                        f"botsdock connector backend error: {message.get('error') or message}",
-                        file=sys.stderr,
-                    )
-                    continue
-                response = await asyncio.to_thread(connector.handle_backend_message, message)
-                if response is not None:
-                    await websocket.send(json.dumps(response, separators=(",", ":")))
-        finally:
-            buffered_sender.flush_all()
-            writer_task.cancel()
-            heartbeat_task.cancel()
-    finally:
-        if app_server is not None:
-            app_server.close()
-
-
 async def run_connector_once(args: argparse.Namespace) -> None:
     specs = resolve_connection_specs(args)
     if len(specs) != 1:
         raise ConnectorError("run_connector_once requires a single connection spec")
     await run_connector_once_for_spec(args, specs[0])
-
-
-def is_non_retriable_connector_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return (
-        "missing connector token" in message
-        or "missing machine-id" in message
-        or "missing machine id" in message
-        or "connector rejected" in message
-        or "bootstrap rejected" in message
-        or "unsupported machine provider" in message
-    )
 
 
 async def run_connector(args: argparse.Namespace) -> None:
@@ -1744,21 +1367,39 @@ async def run_connector(args: argparse.Namespace) -> None:
     await run_supervisor(args, specs)
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     if sys.version_info < (3, 10):
-        print(
-            f"botsdock-connector requires Python >= 3.10, found {sys.version_info.major}.{sys.version_info.minor}.",
-            file=sys.stderr,
+        logger.error(
+            "botsdock-connector requires Python >= 3.10, found %s.%s.",
+            sys.version_info.major, sys.version_info.minor,
         )
         return 1
     args = build_parser().parse_args()
+
+    # Daemon lifecycle commands (synchronous, no asyncio needed).
+    if args.command == "start":
+        return daemon_start(args)
+    if args.command == "stop":
+        return daemon_stop()
+    if args.command == "restart":
+        return daemon_restart(args)
+    if args.command == "status":
+        return daemon_status()
     if args.command == "upgrade":
         return run_upgrade(args)
+
+    # Running the connector (foreground or daemon child).
+    # Install SIGTERM handler for graceful shutdown.
+    install_signal_handlers()
     try:
         asyncio.run(run_connector(args))
         return 0
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        print(f"botsdock connector error: {exc}", file=sys.stderr)
+        logger.error("botsdock connector error: %s", exc)
         return 1

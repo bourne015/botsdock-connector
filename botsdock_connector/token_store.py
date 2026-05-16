@@ -1,3 +1,5 @@
+"""Token store for BotsDock connector credentials."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,17 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .log import get_logger
+
+logger = get_logger(__name__)
 
 JsonDict = dict[str, Any]
 
-TOKEN_STORE_FILE = ".botsdock_connector.json"
-LEGACY_TOKEN_STORE_FILES = (
-    ".botsdock_agent_connector.json",
-    ".codex_connector.json",
-    ".botsdock_codex_connector.json",
-)
+TOKEN_STORE_FILE = ".botsdock/botsdock_connector.json"
 DEFAULT_SERVER = "https://www.botsdock.cn"
-LEGACY_SERVER_URLS = {"https://botsdock.com", "https://www.botsdock.com"}
 
 
 class ConnectorError(Exception):
@@ -40,36 +39,19 @@ class SavedConnector:
 def backend_ws_url(server_url: str, machine_id: str) -> str:
     base = server_url.rstrip("/")
     if base.startswith("https://"):
-        base = "wss://" + base[len("https://") :]
+        base = "wss://" + base[len("https://"):]
     elif base.startswith("http://"):
-        base = "ws://" + base[len("http://") :]
+        base = "ws://" + base[len("http://"):]
     return f"{base}/v1/console/connect?machine_id={machine_id}"
 
 
 def token_store_path(cwd: str | None = None) -> Path:
-    # Keep the cwd argument for older callers; new writes always go to the user home.
     del cwd
     return Path.home().expanduser().resolve() / TOKEN_STORE_FILE
 
 
 def read_token_store_path(cwd: str | None = None) -> Path:
-    path = token_store_path()
-    if path.exists():
-        return path
-    bases: list[Path] = [path.parent]
-    legacy_base = (
-        Path(cwd).expanduser().resolve()
-        if cwd
-        else Path.cwd().expanduser().resolve()
-    )
-    if legacy_base not in bases:
-        bases.append(legacy_base)
-    for base in bases:
-        for filename in (TOKEN_STORE_FILE, *LEGACY_TOKEN_STORE_FILES):
-            legacy = base / filename
-            if legacy.exists():
-                return legacy
-    return path
+    return token_store_path(cwd)
 
 
 def token_store_key(server_url: str, machine_id: str) -> str:
@@ -102,16 +84,6 @@ def load_connector_token(*, server_url: str, machine_id: str, cwd: str | None = 
     data = load_token_store(path)
     connectors = data.get("connectors", {})
     entry = connectors.get(token_store_key(server_url, machine_id))
-    if not isinstance(entry, dict) and normalized_server_url(server_url) == DEFAULT_SERVER:
-        for candidate in connectors.values():
-            if not isinstance(candidate, dict):
-                continue
-            if (
-                candidate.get("machine_id") == machine_id
-                and candidate.get("server") in LEGACY_SERVER_URLS
-            ):
-                entry = candidate
-                break
     if not isinstance(entry, dict):
         return None
     token = entry.get("token")
@@ -175,28 +147,6 @@ def load_saved_connectors(*, server_url: str, cwd: str | None = None) -> list[Sa
         if key not in seen:
             seen.add(key)
             matches.append(connector)
-    if not matches and normalized_server == DEFAULT_SERVER:
-        for entry in data.get("connectors", {}).values():
-            connector = _connector_from_entry(entry)
-            if connector is None:
-                continue
-            if connector.server not in LEGACY_SERVER_URLS:
-                continue
-            connector = SavedConnector(
-                server=normalized_server,
-                machine_id=connector.machine_id,
-                token=connector.token,
-                provider=connector.provider,
-                runtime_profile_id=connector.runtime_profile_id,
-                runtime_profile_name=connector.runtime_profile_name,
-                env_file=connector.env_file,
-                model=connector.model,
-                claude_bin=connector.claude_bin,
-            )
-            key = (connector.server, connector.machine_id)
-            if key not in seen:
-                seen.add(key)
-                matches.append(connector)
     return matches
 
 
@@ -222,8 +172,8 @@ def save_connector_token(
     runtime_profile: dict[str, Any] | None = None,
     cwd: str | None = None,
 ) -> Path:
-    read_path = read_token_store_path(cwd)
     path = token_store_path(cwd)
+    read_path = read_token_store_path(cwd)
     data = load_token_store(read_path)
     connectors = data.setdefault("connectors", {})
     entry: JsonDict = {
@@ -247,15 +197,16 @@ def save_connector_token(
         if saved_profile:
             entry["runtime_profile"] = saved_profile
     connectors[token_store_key(server_url, machine_id)] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
         os.chmod(tmp_path, 0o600)
     except OSError:
-        pass
+        logger.warning("failed to chmod token store tmp file: %s", tmp_path)
     tmp_path.replace(path)
     try:
         os.chmod(path, 0o600)
     except OSError:
-        pass
+        logger.warning("failed to chmod token store file: %s", path)
     return path

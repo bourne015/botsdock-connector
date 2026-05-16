@@ -15,12 +15,14 @@ from botsdock_connector.cli import (
     _connection_args,
     approval_envelope_to_request_opened,
     build_parser,
-    build_upgrade_pip_args,
     envelope_to_backend_message,
     load_env_file,
     provider_hello,
     reconnect_command,
     resolve_connection_specs,
+)
+from botsdock_connector.providers.app_server_client import (
+    AppServerProcessClient,
 )
 from botsdock_connector.providers.claude_agent_sdk import (
     ClaudeAgentSdkProvider,
@@ -28,7 +30,6 @@ from botsdock_connector.providers.claude_agent_sdk import (
     _approval_decision_allows,
 )
 from botsdock_connector.providers.codex_app_server import (
-    AppServerProcessClient,
     CodexConnector,
 )
 from botsdock_connector.token_store import (
@@ -37,6 +38,9 @@ from botsdock_connector.token_store import (
     load_saved_connectors,
     save_connector_token,
     token_store_key,
+)
+from botsdock_connector.upgrade import (
+    build_upgrade_pip_args,
 )
 
 
@@ -355,7 +359,7 @@ def test_saved_connectors_can_be_loaded_together() -> None:
     assert claude.claude_bin == "/usr/local/bin/claude"
 
 
-def test_token_store_uses_new_filename_and_reads_legacy_store() -> None:
+def test_token_store_uses_new_filename() -> None:
     with _temporary_home() as home, tempfile.TemporaryDirectory() as run_dir:
         token_path = save_connector_token(
             server_url=DEFAULT_SERVER,
@@ -364,37 +368,8 @@ def test_token_store_uses_new_filename_and_reads_legacy_store() -> None:
             provider="codex",
             cwd=run_dir,
         )
-        assert token_path.name == ".botsdock_connector.json"
-        assert token_path.parent == Path(home).resolve()
-        assert not (Path(run_dir) / ".botsdock_connector.json").exists()
-
-    with _temporary_home(), tempfile.TemporaryDirectory() as run_dir:
-        legacy_path = Path(run_dir) / ".botsdock_agent_connector.json"
-        legacy_key = token_store_key(DEFAULT_SERVER, "mach_legacy")
-        legacy_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "connectors": {
-                        legacy_key: {
-                            "server": DEFAULT_SERVER,
-                            "machine_id": "mach_legacy",
-                            "provider": "claude_code",
-                            "token": "token_legacy",
-                        }
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        loaded = load_connector_token(
-            server_url=DEFAULT_SERVER,
-            machine_id="mach_legacy",
-            cwd=run_dir,
-        )
-
-    assert loaded == "token_legacy"
+        assert token_path.name == "botsdock_connector.json"
+        assert token_path.parent == (Path(home) / ".botsdock").resolve()
 
 
 def test_no_arg_connection_resolution_supervises_all_saved_connectors() -> None:

@@ -10,7 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+from ..log import get_logger
 from .base import AgentProviderCapabilities, JsonDict, ProviderEnvelope
+
+logger = get_logger(__name__)
 
 
 _AUTO_ALLOW_TOOLS = (
@@ -324,7 +327,8 @@ def _load_jsonl(path: Path) -> list[JsonDict]:
                     continue
                 if isinstance(value, dict):
                     records.append(value)
-    except OSError:
+    except OSError as exc:
+        logger.warning("failed to read transcript file %s: %s", path, exc)
         return []
     return records
 
@@ -820,9 +824,11 @@ class ClaudeAgentSdkProvider:
                 try:
                     delete_session(session_id)
                     return True
-                except Exception:
+                except Exception as exc:
+                    logger.warning("SDK %s failed for %s: %s", function_name, session_id, exc)
                     continue
-            except Exception:
+            except Exception as exc:
+                logger.warning("SDK %s failed for %s: %s", function_name, session_id, exc)
                 continue
         return False
 
@@ -858,9 +864,11 @@ class ClaudeAgentSdkProvider:
         except TypeError:
             try:
                 sessions = list_sessions(directory=None, limit=limit)
-            except Exception:
+            except Exception as exc:
+                logger.warning("SDK list_sessions failed: %s", exc)
                 return []
-        except Exception:
+        except Exception as exc:
+            logger.warning("SDK list_sessions failed: %s", exc)
             return []
         threads: list[JsonDict] = []
         for session in sessions or []:
@@ -1032,9 +1040,11 @@ class ClaudeAgentSdkProvider:
         except TypeError:
             try:
                 messages = get_messages(session_id)
-            except Exception:
+            except Exception as exc:
+                logger.warning("SDK get_session_messages failed for %s: %s", session_id, exc)
                 return []
-        except Exception:
+        except Exception as exc:
+            logger.warning("SDK get_session_messages failed for %s: %s", session_id, exc)
             return []
         normalized: list[JsonDict] = []
         for message in messages or []:
@@ -1289,6 +1299,9 @@ class ClaudeAgentSdkProvider:
         # without persisting or reporting the token value.
         if env.get("ANTHROPIC_AUTH_TOKEN") and not env.get("ANTHROPIC_API_KEY"):
             env["ANTHROPIC_API_KEY"] = env["ANTHROPIC_AUTH_TOKEN"]
+            logger.info(
+                "mirroring ANTHROPIC_AUTH_TOKEN to ANTHROPIC_API_KEY for SDK child process"
+            )
         return env
 
     def _build_permission_handler(
@@ -1678,3 +1691,29 @@ class ClaudeAgentSdkProvider:
         if name == "ClaudeAgentSdkRuntimeMissing":
             return "provider_runtime_missing"
         return "connector_error"
+
+
+# ---------------------------------------------------------------------------
+# Exported helpers (used by cli.py)
+# ---------------------------------------------------------------------------
+
+def _runtime_profile_log_line(profile: JsonDict) -> str:
+    keys = profile.get("env_keys") if isinstance(profile.get("env_keys"), list) else []
+    visible_keys = [str(key) for key in keys[:16]]
+    if len(keys) > len(visible_keys):
+        visible_keys.append(f"+{len(keys) - len(visible_keys)} more")
+    env_keys = ",".join(visible_keys) if visible_keys else "none"
+    env_file = "configured" if profile.get("env_file_configured") else "none"
+    model = profile.get("model") or "cli_default"
+    model_source = profile.get("model_source") or "unknown"
+    return (
+        "claude runtime: "
+        f"profile={profile.get('id') or 'default'} "
+        f"auth_source={profile.get('auth_source') or 'unknown'} "
+        f"cli={profile.get('cli_label') or 'sdk_default'} "
+        f"model={model} model_source={model_source} env_file={env_file} env_keys={env_keys}"
+    )
+
+
+def _should_warn_missing_claude_env(profile: JsonDict) -> bool:
+    return not profile.get("has_claude_auth_env") and not profile.get("env_file_configured")

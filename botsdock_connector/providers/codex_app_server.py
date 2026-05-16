@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Local Codex connector for Bots Dock Codex Remote Console.
+"""Codex app-server connector for Bots Dock Codex Remote Console.
 
 The connector runs on a user's machine. It connects outbound to the backend
 WebSocket, starts a local `codex app-server` over stdio, forwards backend
@@ -9,26 +8,23 @@ requests to app-server JSON-RPC, and reports normalized events back.
 from __future__ import annotations
 
 import asyncio
-import json
-import queue
 import re
-import signal
-import socket
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from .. import __version__
+from ..log import get_logger
+from .app_server_client import AppServerError, ConnectorError
+from .delta_buffer import BufferedBackendSender
 
+logger = get_logger(__name__)
 
 JsonDict = dict[str, Any]
 
-DEFAULT_DELTA_FLUSH_INTERVAL_SECONDS = 0.12
-DEFAULT_DELTA_FLUSH_CHARS = 768
 TIMING_EVENT_TYPES = {
     "thread.started",
     "thread.resumed",
@@ -57,14 +53,6 @@ def _version_label(value: Any) -> str | None:
     return text[:64]
 
 
-class ConnectorError(Exception):
-    pass
-
-
-class AppServerError(ConnectorError):
-    pass
-
-
 def _is_thread_not_found_error(error: Exception) -> bool:
     return "thread not found" in str(error).lower()
 
@@ -75,148 +63,6 @@ def _elapsed_ms(started_at: float) -> float:
 
 def _should_log_timing_event(event_type: Any) -> bool:
     return isinstance(event_type, str) and event_type in TIMING_EVENT_TYPES
-
-
-class AppServerProcessClient:
-    def __init__(
-        self,
-        *,
-        codex_bin: str = "codex",
-        cwd: str | None = None,
-        timeout: float = 60,
-        on_message: Callable[[JsonDict], None] | None = None,
-    ) -> None:
-        self.codex_bin = codex_bin
-        self.cwd = cwd or str(Path.cwd())
-        self.timeout = timeout
-        self.on_message = on_message
-        self._next_id = 1
-        self._pending: dict[int, queue.Queue[JsonDict]] = {}
-        self._pending_lock = threading.Lock()
-        self._stderr_lines: queue.Queue[str] = queue.Queue()
-        self.proc = subprocess.Popen(
-            [codex_bin, "app-server", "--listen", "stdio://"],
-            cwd=self.cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
-        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
-        self._stdout_thread.start()
-        self._stderr_thread.start()
-
-    def close(self) -> None:
-        if self.proc.poll() is not None:
-            return
-        try:
-            self.proc.send_signal(signal.SIGTERM)
-            self.proc.wait(timeout=3)
-        except Exception:
-            self.proc.kill()
-
-    def initialize(self) -> JsonDict:
-        response = self.request(
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "botsdock_codex_remote_console",
-                    "title": "Bots Dock Codex Connector",
-                    "version": __version__,
-                },
-                "capabilities": {
-                    "experimentalApi": True,
-                    "optOutNotificationMethods": [],
-                },
-            },
-        )
-        self.notification("initialized")
-        return response
-
-    def request(self, method: str, params: Any | None = None) -> JsonDict:
-        request_id = self._allocate_id()
-        pending: queue.Queue[JsonDict] = queue.Queue(maxsize=1)
-        with self._pending_lock:
-            self._pending[request_id] = pending
-        try:
-            message: JsonDict = {"id": request_id, "method": method}
-            if params is not None:
-                message["params"] = params
-            self.send(message)
-            response = pending.get(timeout=self.timeout)
-            if "error" in response:
-                raise AppServerError(str(response["error"]))
-            return response.get("result") or {}
-        except queue.Empty as exc:
-            raise TimeoutError(f"timed out waiting for app-server response {method}") from exc
-        finally:
-            with self._pending_lock:
-                self._pending.pop(request_id, None)
-
-    def notification(self, method: str, params: Any | None = None) -> None:
-        message: JsonDict = {"method": method}
-        if params is not None:
-            message["params"] = params
-        self.send(message)
-
-    def send_response(self, request_id: Any, result: JsonDict | None = None, error: JsonDict | None = None) -> None:
-        message: JsonDict = {"id": request_id}
-        if error is not None:
-            message["error"] = error
-        else:
-            message["result"] = result or {}
-        self.send(message)
-
-    def send(self, message: JsonDict) -> None:
-        if self.proc.poll() is not None:
-            raise AppServerError(f"app-server exited with code {self.proc.returncode}")
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-        self.proc.stdin.flush()
-
-    def stderr_snapshot(self) -> list[str]:
-        lines: list[str] = []
-        while True:
-            try:
-                lines.append(self._stderr_lines.get_nowait())
-            except queue.Empty:
-                break
-        return lines
-
-    def _allocate_id(self) -> int:
-        request_id = self._next_id
-        self._next_id += 1
-        return request_id
-
-    def _read_stdout(self) -> None:
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                message = {"method": "connector/nonJsonStdout", "params": {"line": line}}
-            self._route_message(message)
-
-    def _read_stderr(self) -> None:
-        assert self.proc.stderr is not None
-        for line in self.proc.stderr:
-            self._stderr_lines.put(line.rstrip())
-
-    def _route_message(self, message: JsonDict) -> None:
-        message_id = message.get("id")
-        if message_id is not None and ("result" in message or "error" in message):
-            with self._pending_lock:
-                pending = self._pending.get(message_id)
-            if pending is not None:
-                pending.put(message)
-                return
-        if self.on_message is not None:
-            self.on_message(message)
 
 
 class CodexConnector:
@@ -372,9 +218,9 @@ class CodexConnector:
                 return self._error(request_id, "unsupported_request", f"unsupported backend request type: {msg_type}")
             return None
         except Exception as exc:
-            print(
-                f"codex connector request failed: type={msg_type} request={request_id} error={exc}",
-                file=sys.stderr,
+            logger.error(
+                "codex connector request failed: type=%s request=%s error=%s",
+                msg_type, request_id, exc,
             )
             return self._error(request_id, "connector_error", str(exc))
 
@@ -392,12 +238,11 @@ class CodexConnector:
             self._send_backend(event)
             event_type = event.get("event_type")
             if _should_log_timing_event(event_type):
-                print(
+                logger.info(
                     "codex connector timing appserver_event: "
-                    f"method={method} event_type={event_type} "
-                    f"thread={event.get('thread_id')} turn={event.get('turn_id')} "
-                    f"handle_ms={_elapsed_ms(started_at):.1f}",
-                    file=sys.stderr,
+                    "method=%s event_type=%s thread=%s turn=%s handle_ms=%.1f",
+                    method, event_type, event.get("thread_id"), event.get("turn_id"),
+                    _elapsed_ms(started_at),
                 )
 
     def _handle_turn_start(self, payload: JsonDict) -> JsonDict:
@@ -420,10 +265,10 @@ class CodexConnector:
         except AppServerError as exc:
             if not _is_thread_not_found_error(exc):
                 raise
-            print(
+            logger.info(
                 "codex connector app-server thread not loaded: "
-                f"thread={internal_thread_id} app_thread={app_thread_id}; resuming",
-                file=sys.stderr,
+                "thread=%s app_thread=%s; resuming",
+                internal_thread_id, app_thread_id,
             )
             self._resume_app_thread(internal_thread_id, app_thread_id, payload)
             request_started_at = time.monotonic()
@@ -445,12 +290,12 @@ class CodexConnector:
             },
             result,
         )
-        print(
+        logger.info(
             "codex connector timing turn_start: "
-            f"thread={internal_thread_id} turn={internal_turn_id} "
-            f"app_thread={app_thread_id} app_turn={app_turn_id} "
-            f"request_ms={request_ms:.1f} total_ms={_elapsed_ms(handler_started_at):.1f}",
-            file=sys.stderr,
+            "thread=%s turn=%s app_thread=%s app_turn=%s request_ms=%.1f total_ms=%.1f",
+            internal_thread_id, internal_turn_id,
+            app_thread_id, app_turn_id,
+            request_ms, _elapsed_ms(handler_started_at),
         )
         return {"app_server_thread_id": app_thread_id, "app_server_turn_id": app_turn_id}
 
@@ -518,9 +363,6 @@ class CodexConnector:
             "approvalPolicy": payload.get("approval_policy") or "on-request",
             "approvalsReviewer": "user",
             "sandbox": payload.get("sandbox") or "workspace-write",
-            # Official Codex client sessions are ordinary persisted threads by
-            # default. Keep the protocol flag for a future advanced "temporary
-            # thread" UI, but do not opt into it implicitly.
             "ephemeral": bool(payload.get("ephemeral", False)),
             "experimentalRawEvents": False,
             "persistExtendedHistory": False,
@@ -547,11 +389,10 @@ class CodexConnector:
             },
             result,
         )
-        print(
+        logger.info(
             "codex connector timing thread_start: "
-            f"thread={internal_thread_id} app_thread={app_thread_id} "
-            f"request_ms={request_ms:.1f}",
-            file=sys.stderr,
+            "thread=%s app_thread=%s request_ms=%.1f",
+            internal_thread_id, app_thread_id, request_ms,
         )
         return app_thread_id
 
@@ -600,8 +441,11 @@ class CodexConnector:
         if app_thread_id:
             try:
                 self.app_server.request("thread/archive", {"threadId": app_thread_id})
-            except Exception:
-                pass  # Best-effort archive on the app-server side
+            except Exception as exc:
+                logger.warning(
+                    "thread/archive request failed for thread=%s: %s",
+                    internal_thread_id, exc,
+                )
         self.thread_map.pop(internal_thread_id, None)
         if app_thread_id:
             self.reverse_thread_map.pop(app_thread_id, None)
@@ -646,11 +490,10 @@ class CodexConnector:
         )
         self._flush_unmapped_server_requests()
         self._send_backend_event("thread.resumed", internal_thread_id, None, {"app_server_thread_id": app_thread_id}, result)
-        print(
+        logger.info(
             "codex connector timing thread_resume: "
-            f"thread={internal_thread_id} app_thread={app_thread_id} "
-            f"request_ms={_elapsed_ms(started_at):.1f}",
-            file=sys.stderr,
+            "thread=%s app_thread=%s request_ms=%.1f",
+            internal_thread_id, app_thread_id, _elapsed_ms(started_at),
         )
         return result
 
@@ -736,10 +579,9 @@ class CodexConnector:
         if cursor:
             params["cursor"] = cursor
         started_at = time.monotonic()
-        print(
-            "codex connector thread history start: "
-            f"thread={app_thread_id} direction={direction} limit={limit}",
-            file=sys.stderr,
+        logger.info(
+            "codex connector thread history start: thread=%s direction=%s limit=%s",
+            app_thread_id, direction, limit,
         )
         result = self.app_server.request("thread/turns/list", params)
         thread = result.get("thread") if isinstance(result.get("thread"), dict) else {}
@@ -757,11 +599,11 @@ class CodexConnector:
             if isinstance(turn, dict)
         )
         backend_turns = list(reversed(turns)) if turns else []
-        print(
+        logger.info(
             "codex connector thread history done: "
-            f"thread={app_thread_id} direction={direction} turns={len(turns)} items={item_count} "
-            f"elapsed={time.monotonic() - started_at:.2f}s",
-            file=sys.stderr,
+            "thread=%s direction=%s turns=%s items=%s elapsed=%.2fs",
+            app_thread_id, direction, len(turns), item_count,
+            time.monotonic() - started_at,
         )
         return {
             "type": "thread.history",
@@ -1092,8 +934,7 @@ class CodexConnector:
             return
         result = self.backend_send(message)
         if asyncio.iscoroutine(result):
-            # The runtime path passes an async sender through run_coroutine_threadsafe.
-            raise RuntimeError("async backend sender must be scheduled by caller")
+            logger.warning("async backend sender result ignored; must be scheduled by caller")
 
     @staticmethod
     def _ok(request_id: Any, payload: JsonDict | None = None) -> JsonDict:
@@ -1108,6 +949,10 @@ class CodexConnector:
             "error": {"code": code, "message": message},
         }
 
+
+# ---------------------------------------------------------------------------
+# Notification normalizers
+# ---------------------------------------------------------------------------
 
 def normalize_appserver_notification(method: str, params: JsonDict) -> tuple[str | None, JsonDict]:
     if method == "thread/status/changed":
@@ -1214,6 +1059,10 @@ def normalize_appserver_notification(method: str, params: JsonDict) -> tuple[str
         }
     return "app_server.notification", {"method": method, "params": params}
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _is_approval_request(method: str, params: JsonDict) -> bool:
     if "approval" in method.lower():
@@ -1335,7 +1184,6 @@ def _first_present(value: JsonDict, *keys: str) -> Any:
         if key in value:
             return value.get(key)
     return None
-
 
 
 def _extract_thread_list(result: JsonDict) -> list[JsonDict]:
@@ -1469,6 +1317,7 @@ def _timestamp_seconds(value: Any) -> int | None:
             return None
     return None
 
+
 def _thread_status(status: Any) -> str:
     if isinstance(status, dict):
         status_type = status.get("type")
@@ -1578,182 +1427,3 @@ def _git_branch(cwd: str) -> str | None:
         return None
     branch = result.stdout.strip()
     return branch or None
-
-
-class BufferedBackendSender:
-    """Coalesce tiny streaming deltas before sending them to the backend."""
-
-    def __init__(
-        self,
-        *,
-        loop: asyncio.AbstractEventLoop,
-        outbound: asyncio.Queue[JsonDict],
-        flush_interval: float = DEFAULT_DELTA_FLUSH_INTERVAL_SECONDS,
-        max_chars: int = DEFAULT_DELTA_FLUSH_CHARS,
-    ) -> None:
-        self.loop = loop
-        self.outbound = outbound
-        self.flush_interval = max(0.02, flush_interval)
-        self.max_chars = max(1, max_chars)
-        self._lock = threading.Lock()
-        self._buffers: dict[tuple[Any, ...], JsonDict] = {}
-        self._flush_scheduled = False
-
-    def send(self, message: JsonDict) -> None:
-        key = self._coalesce_key(message)
-        if key is None:
-            self.flush_all()
-            self._put(message)
-            return
-        if message.get("event_type") == "file.changed":
-            self._buffer_file_change(key, message)
-            return
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-        text = payload.get("text")
-        if not isinstance(text, str) or not text:
-            self.flush_all()
-            self._put(message)
-            return
-        ready: JsonDict | None = None
-        with self._lock:
-            entry = self._buffers.get(key)
-            if entry is None:
-                buffered = dict(message)
-                buffered_payload = dict(payload)
-                buffered_payload["text"] = ""
-                buffered["payload"] = buffered_payload
-                entry = {"message": buffered, "parts": [], "chars": 0}
-                self._buffers[key] = entry
-                self._schedule_flush_locked()
-            entry["parts"].append(text)
-            entry["chars"] += len(text)
-            if entry["chars"] >= self.max_chars:
-                ready = self._buffers.pop(key)
-        if ready is not None:
-            self._put(self._materialize(ready))
-
-    def _buffer_file_change(self, key: tuple[Any, ...], message: JsonDict) -> None:
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-        paths = _file_change_paths(payload)
-        if not paths and not isinstance(payload.get("changes"), list):
-            self.flush_all()
-            self._put(message)
-            return
-        with self._lock:
-            entry = self._buffers.get(key)
-            if entry is None:
-                buffered = dict(message)
-                buffered["payload"] = _merged_file_change_payload({}, payload)
-                self._buffers[key] = {"message": buffered}
-                self._schedule_flush_locked()
-                return
-            current = entry["message"]
-            current["payload"] = _merged_file_change_payload(current.get("payload") or {}, payload)
-
-    def flush_all(self) -> None:
-        with self._lock:
-            entries = list(self._buffers.values())
-            self._buffers.clear()
-            self._flush_scheduled = False
-        for entry in entries:
-            self._put(self._materialize(entry))
-
-    def _schedule_flush_locked(self) -> None:
-        if self._flush_scheduled:
-            return
-        self._flush_scheduled = True
-
-        def schedule() -> None:
-            self.loop.call_later(self.flush_interval, self.flush_all)
-
-        self.loop.call_soon_threadsafe(schedule)
-
-    def _put(self, message: JsonDict) -> None:
-        asyncio.run_coroutine_threadsafe(self.outbound.put(message), self.loop)
-
-    @staticmethod
-    def _materialize(entry: JsonDict) -> JsonDict:
-        message = dict(entry["message"])
-        if "parts" not in entry:
-            message["payload"] = dict(message.get("payload") or {})
-            return message
-        payload = dict(message.get("payload") or {})
-        payload["text"] = "".join(entry["parts"])
-        message["payload"] = payload
-        return message
-
-    @staticmethod
-    def _coalesce_key(message: JsonDict) -> tuple[Any, ...] | None:
-        if message.get("type") != "app_server.event":
-            return None
-        event_type = message.get("event_type")
-        if event_type not in {"assistant.delta", "command.output", "plan.delta", "reasoning.delta", "file.changed"}:
-            return None
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-        if event_type == "file.changed":
-            return (event_type, message.get("thread_id"), payload.get("watch_id"))
-        return (
-            event_type,
-            message.get("thread_id"),
-            message.get("turn_id"),
-            payload.get("item_id") if event_type in {"command.output", "reasoning.delta"} else None,
-        )
-
-
-def _file_change_paths(payload: JsonDict) -> list[str]:
-    values: list[str] = []
-    for raw in (payload.get("paths"), payload.get("changed_paths"), payload.get("changedPaths")):
-        if isinstance(raw, list):
-            values.extend(_string_value(item) for item in raw if _string_value(item))
-        elif _string_value(raw):
-            values.append(_string_value(raw))
-    if _string_value(payload.get("path")):
-        values.append(_string_value(payload.get("path")))
-    return _unique_strings(values)
-
-
-def _merged_file_change_payload(current: JsonDict, incoming: JsonDict) -> JsonDict:
-    merged = dict(current)
-    for key, value in incoming.items():
-        if key not in {"paths", "changed_paths", "changedPaths", "path", "changes"} and value is not None:
-            merged[key] = value
-    paths = _unique_strings([*_file_change_paths(current), *_file_change_paths(incoming)])
-    if paths:
-        merged["paths"] = paths
-        merged["changed_paths"] = paths
-        merged["path"] = paths[0]
-    changes = _unique_changes(current.get("changes"), incoming.get("changes"))
-    if changes:
-        merged["changes"] = changes
-    return merged
-
-
-def _unique_strings(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value and value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
-def _unique_changes(*groups: Any) -> list[JsonDict]:
-    result: list[JsonDict] = []
-    seen: set[tuple[Any, ...]] = set()
-    for group in groups:
-        if not isinstance(group, list):
-            continue
-        for item in group:
-            if not isinstance(item, dict):
-                continue
-            key = (
-                item.get("path"),
-                item.get("change_type") or item.get("changeType"),
-                item.get("diff"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(dict(item))
-    return result
