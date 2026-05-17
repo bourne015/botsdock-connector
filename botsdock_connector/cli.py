@@ -45,9 +45,8 @@ from .token_store import (
     backend_ws_url,
     load_connector_token,
     load_saved_connectors,
-    save_connector_token,
 )
-from .upgrade import build_upgrade_pip_args, run_upgrade
+from .upgrade import run_upgrade
 
 logger = get_logger(__name__)
 
@@ -243,16 +242,12 @@ def default_env_file(runtime_profile_id: str | None = None) -> str | None:
         return configured
     profile_id = normalize_runtime_profile_id(runtime_profile_id)
     if profile_id != DEFAULT_RUNTIME_PROFILE_ID:
-        for profile_path in (
-            Path.home() / ".botsdock" / f"botsdock_connector.{profile_id}.env",
-        ):
-            if profile_path.exists():
-                return str(profile_path)
-    for path in (
-        Path.home() / ".botsdock" / "botsdock_connector.env",
-    ):
-        if path.exists():
-            return str(path)
+        profile_path = Path.home() / ".botsdock" / f"botsdock_connector.{profile_id}.env"
+        if profile_path.exists():
+            return str(profile_path)
+    default_path = Path.home() / ".botsdock" / "botsdock_connector.env"
+    if default_path.exists():
+        return str(default_path)
     return None
 
 
@@ -430,8 +425,6 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
                 or (saved_connector.claude_bin if saved_connector is not None else None),
             )
         ]
-    if token:
-        raise ConnectorError("missing machine-id for registration token connection")
 
     saved_connectors = load_saved_connectors(server_url=args.server, cwd=cwd)
     if not saved_connectors:
@@ -1034,6 +1027,8 @@ async def _send_initial_runtime_sync(websocket: Any, mux: AgentConnectorMux) -> 
 
 # ---------------------------------------------------------------------------
 # Agent provider session (multi-runtime mux)
+# ---------------------------------------------------------------------------
+
 def _log_runtime_warning(args: argparse.Namespace, msg: str, *fmt_args: Any) -> None:
     """Log a runtime warning. During registration-only, use info level."""
     if getattr(args, "registration_only", False):
@@ -1041,8 +1036,6 @@ def _log_runtime_warning(args: argparse.Namespace, msg: str, *fmt_args: Any) -> 
     else:
         logger.warning(msg, *fmt_args)
 
-
-# ---------------------------------------------------------------------------
 
 async def run_agent_provider_session(
     *,
@@ -1348,7 +1341,7 @@ async def run_connector(args: argparse.Namespace) -> None:
     if args.token:
         await run_connector_once_for_spec(args, specs[0])
         return
-    if len(specs) == 1 and (args.machine_id or args.token):
+    if len(specs) == 1 and args.machine_id:
         await run_connection(args, specs[0], supervised=False)
         return
     await run_supervisor(args, specs)

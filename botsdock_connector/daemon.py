@@ -73,14 +73,7 @@ def _write_pid_data(pid: int, server: str, cwd: str, machine_ids: list[str]) -> 
 
 
 def _remove_pid_data() -> None:
-    try:
-        pid_file_path().unlink(missing_ok=True)
-    except (TypeError, AttributeError):
-        # Python < 3.8 compat
-        try:
-            pid_file_path().unlink()
-        except FileNotFoundError:
-            pass
+    pid_file_path().unlink(missing_ok=True)
 
 
 def _is_pid_alive(pid: int) -> bool:
