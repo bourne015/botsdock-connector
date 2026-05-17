@@ -25,6 +25,7 @@ from .daemon import (
 from .log import get_logger
 from .protocol import CONNECTION_MODE, PROTOCOL_VERSION
 from .providers.claude_agent_sdk import ClaudeAgentSdkProvider, _runtime_profile_log_line, _should_warn_missing_claude_env
+from .register import run_register
 from .providers.codex_app_server import (
     CodexConnector,
     _version_label,
@@ -220,6 +221,15 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser(
         "status",
         help="Print daemon status",
+    )
+    register_parser = subparsers.add_parser(
+        "register",
+        help="Register this machine with a short code",
+    )
+    register_parser.add_argument(
+        "--renew",
+        action="store_true",
+        help="Re-register an existing machine (refreshes token)",
     )
     parser.set_defaults(reconnect=True)
     return parser
@@ -1369,6 +1379,8 @@ def main() -> int:
         return daemon_restart(args)
     if args.command == "status":
         return daemon_status()
+    if args.command == "register":
+        return run_register(args)
     if args.command == "upgrade":
         return run_upgrade(args)
 
