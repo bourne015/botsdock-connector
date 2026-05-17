@@ -1049,6 +1049,14 @@ async def _send_initial_runtime_sync(websocket: Any, mux: AgentConnectorMux) -> 
 
 # ---------------------------------------------------------------------------
 # Agent provider session (multi-runtime mux)
+def _log_runtime_warning(args: argparse.Namespace, msg: str, *fmt_args: Any) -> None:
+    """Log a runtime warning. During registration-only, use info level."""
+    if getattr(args, "registration_only", False):
+        logger.info(msg, *fmt_args)
+    else:
+        logger.warning(msg, *fmt_args)
+
+
 # ---------------------------------------------------------------------------
 
 async def run_agent_provider_session(
@@ -1121,7 +1129,7 @@ async def run_agent_provider_session(
             codex_app_server.close()
         codex_app_server = None
         codex_connector = None
-        logger.warning("codex runtime unavailable: %s", exc)
+        _log_runtime_warning(args, "codex runtime unavailable: %s", exc)
 
     profile_env = load_env_file(getattr(args, "env_file", None))
     if profile_env:
@@ -1171,7 +1179,7 @@ async def run_agent_provider_session(
             "provider_object": claude_provider,
         }
     except Exception as exc:
-        logger.warning("claude runtime unavailable: %s", exc)
+        _log_runtime_warning(args, "claude runtime unavailable: %s", exc)
 
     if not runtimes:
         raise ConnectorError("no provider runtimes are available")
@@ -1194,15 +1202,23 @@ async def run_agent_provider_session(
 
     await accepted_handler(accepted)
 
+    registration_only = getattr(args, "registration_only", False)
+    if registration_only:
+        print(
+            f"Registration successful!\n"
+            f"  Machine: {accepted.get('machine_id') or machine_id}\n"
+            f"  Server:  {args.server.rstrip('/')}\n"
+            f"  Runtimes: {', '.join(mux.providers()) if mux.providers() else 'none'}\n"
+            f"\nRun 'botsdock-connector' to start.",
+            file=sys.stderr,
+        )
+        await mux.stop()
+        return
+
     logger.info(
         "connector accepted: provider=agent runtimes=%s machine=%s session=%s",
         ",".join(mux.providers()), accepted.get("machine_id"), accepted.get("session_id"),
     )
-
-    if getattr(args, "registration_only", False):
-        logger.info("registration saved; run `botsdock-connector` to start all saved connections")
-        await mux.stop()
-        return
 
     await _send_initial_runtime_sync(websocket, mux)
 
@@ -1395,11 +1411,24 @@ def main() -> int:
     # Running the connector (foreground or daemon child).
     # Install SIGTERM handler for graceful shutdown.
     install_signal_handlers()
+    is_registration = bool(args.token and args.machine_id)
     try:
         asyncio.run(run_connector(args))
         return 0
     except KeyboardInterrupt:
         return 130
+    except ConnectorError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if is_registration:
+            print("Registration failed. Check that --machine-id and --token are correct.", file=sys.stderr)
+        return 1
     except Exception as exc:
-        logger.error("botsdock connector error: %s", exc)
+        logger.error("botsdock connector error: %s", exc, exc_info=True)
+        if is_registration:
+            print(
+                f"Registration failed. Could not connect to backend.\n"
+                f"  Details: {exc}\n"
+                f"  Check network connectivity and server URL.",
+                file=sys.stderr,
+            )
         return 1
