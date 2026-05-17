@@ -120,14 +120,12 @@ def test_daemon_stop_stale_pid(tmp_path, monkeypatch, capsys):
     assert "not running" in captured.err
 
 
-def test_build_child_command_strips_start():
+def test_build_child_command_strips_start_and_restart():
     cmd = _build_child_command()
     assert "start" not in cmd
-    assert "stop" not in cmd
     assert "restart" not in cmd
-    assert "status" not in cmd
-    assert "upgrade" not in cmd
-    assert cmd[0] == cmd[0]  # Just check it's a list
+    # Other subcommands would not normally appear in sys.argv for start/restart.
+    assert isinstance(cmd, list) and len(cmd) >= 2
 
 
 def test_install_signal_handlers():

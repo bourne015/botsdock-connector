@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..log import get_logger
+from ..protocol import PROTOCOL_VERSION
 from .app_server_client import AppServerError, ConnectorError
 from .delta_buffer import BufferedBackendSender
 
@@ -97,7 +98,7 @@ class CodexConnector:
             "connector_version": connector_version,
             "platform": sys.platform,
             "hostname": socket.gethostname(),
-            "protocol_version": "0.1",
+            "protocol_version": PROTOCOL_VERSION,
             "capabilities": [
                 "app_server.thread_list",
                 "app_server.thread_start",

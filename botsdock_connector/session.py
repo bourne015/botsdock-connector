@@ -6,7 +6,6 @@ import asyncio
 import json
 import socket
 import sys
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import __version__
@@ -14,22 +13,12 @@ from .log import get_logger
 from .protocol import CONNECTION_MODE, PROTOCOL_VERSION
 from .token_store import (
     ConnectorError,
-    backend_ws_url,
     save_connector_token,
 )
 
 logger = get_logger(__name__)
 
 JsonDict = dict[str, Any]
-
-
-@dataclass
-class SessionConfig:
-    websocket: Any
-    connection_args: Any
-    connector_cwd: str
-    machine_id: str
-
 
 MessageHandler = Callable[[JsonDict], Any]
 
@@ -88,72 +77,6 @@ async def message_loop(
             if tag_provider_fn is not None and provider_tag is not None:
                 response = tag_provider_fn(response, provider_tag)
             await websocket.send(json.dumps(response, separators=(",", ":")))
-
-
-async def run_websocket_session(
-    config: SessionConfig,
-    *,
-    hello_message: JsonDict,
-    accepted_handler: Callable[[JsonDict], Any] | None = None,
-    handler: MessageHandler,
-    outbound: asyncio.Queue[JsonDict],
-    heartbeat_interval_seconds: float = 15,
-    replay_fn: Callable[[], None] | None = None,
-    tag_provider_fn: Callable[[JsonDict, str], JsonDict] | None = None,
-    provider_tag: str | None = None,
-    initial_sync_fn: Callable[[], Any] | None = None,
-    registration_only: bool = False,
-    cleanup_fn: Callable[[], Any] | None = None,
-) -> None:
-    await websocket.send(json.dumps(hello_message, separators=(",", ":")))
-    accepted = json.loads(await websocket.recv())
-    if accepted.get("type") != "connector.accepted":
-        raise ConnectorError(f"connector rejected: {accepted}")
-
-    if accepted_handler is not None:
-        await accepted_handler(accepted)
-
-    logger.info(
-        "connector accepted: machine=%s session=%s",
-        accepted.get("machine_id"), accepted.get("session_id"),
-    )
-
-    if registration_only:
-        logger.info(
-            "registration saved; run `botsdock-connector` to start all saved connections"
-        )
-        if cleanup_fn is not None:
-            await cleanup_fn()
-        return
-
-    if initial_sync_fn is not None:
-        await initial_sync_fn()
-
-    cancelled = asyncio.Event()
-    writer_task = asyncio.create_task(
-        outbound_writer(websocket, outbound, tag_provider_fn=tag_provider_fn, provider_tag=provider_tag)
-    )
-    heartbeat_task = asyncio.create_task(
-        heartbeat_sender(
-            websocket,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-            replay_fn=replay_fn,
-            cancelled=cancelled,
-        )
-    )
-    try:
-        await message_loop(
-            websocket,
-            handler=handler,
-            tag_provider_fn=tag_provider_fn,
-            provider_tag=provider_tag,
-        )
-    finally:
-        cancelled.set()
-        writer_task.cancel()
-        heartbeat_task.cancel()
-        if cleanup_fn is not None:
-            await cleanup_fn()
 
 
 async def send_bootstrap(websocket: Any, args: Any) -> JsonDict:

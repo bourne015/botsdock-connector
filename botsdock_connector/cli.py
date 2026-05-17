@@ -9,7 +9,6 @@ import shlex
 import shutil
 import signal
 import socket
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,11 +32,9 @@ from .providers.codex_app_server import (
 from .providers.app_server_client import AppServerProcessClient
 from .providers.delta_buffer import BufferedBackendSender
 from .session import (
-    SessionConfig,
     heartbeat_sender,
     outbound_writer,
     message_loop,
-    run_websocket_session,
     send_bootstrap,
     save_accepted_token as save_token,
 )
@@ -248,13 +245,11 @@ def default_env_file(runtime_profile_id: str | None = None) -> str | None:
     if profile_id != DEFAULT_RUNTIME_PROFILE_ID:
         for profile_path in (
             Path.home() / ".botsdock" / f"botsdock_connector.{profile_id}.env",
-            Path.home() / ".botsdock" / f"agent_connector.{profile_id}.env",
         ):
             if profile_path.exists():
                 return str(profile_path)
     for path in (
         Path.home() / ".botsdock" / "botsdock_connector.env",
-        Path.home() / ".botsdock" / "agent_connector.env",
     ):
         if path.exists():
             return str(path)
@@ -450,16 +445,6 @@ def resolve_connection_specs(args: argparse.Namespace) -> list[ConnectionSpec]:
         )
         for connector in saved_connectors
     ]
-
-
-async def resolve_connection_args(args: argparse.Namespace) -> tuple[str, str, str]:
-    specs = resolve_connection_specs(args)
-    if len(specs) > 1:
-        raise ConnectorError(
-            "multiple saved connectors found; call resolve_connection_specs for supervisor mode"
-        )
-    spec = specs[0]
-    return spec.cwd, spec.machine_id, spec.token
 
 
 def connection_label(spec: ConnectionSpec) -> str:
@@ -1222,13 +1207,6 @@ async def run_agent_provider_session(
 
     await _send_initial_runtime_sync(websocket, mux)
 
-    config = SessionConfig(
-        websocket=websocket,
-        connection_args=args,
-        connector_cwd=connector_cwd,
-        machine_id=machine_id,
-    )
-
     heartbeat_interval = 15
     try:
         raw_interval = accepted.get("heartbeat_interval_seconds") or 15
@@ -1363,13 +1341,6 @@ async def run_supervisor(args: argparse.Namespace, specs: list[ConnectionSpec]) 
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def run_connector_once(args: argparse.Namespace) -> None:
-    specs = resolve_connection_specs(args)
-    if len(specs) != 1:
-        raise ConnectorError("run_connector_once requires a single connection spec")
-    await run_connector_once_for_spec(args, specs[0])
 
 
 async def run_connector(args: argparse.Namespace) -> None:

@@ -8,7 +8,6 @@ import json
 import pytest
 
 from botsdock_connector.session import (
-    SessionConfig,
     heartbeat_sender,
     outbound_writer,
     message_loop,
@@ -149,13 +148,4 @@ def test_protocol_constants():
     assert CONNECTION_MODE == "remote_ws"
 
 
-def test_session_config_creation():
-    ws = MockWebSocket()
-    config = SessionConfig(
-        websocket=ws,
-        connection_args=None,
-        connector_cwd="/tmp/test",
-        machine_id="mach_1",
-    )
-    assert config.connector_cwd == "/tmp/test"
-    assert config.machine_id == "mach_1"
+# SessionConfig removed — unused abstraction

@@ -106,7 +106,7 @@ def _build_child_command() -> list[str]:
     cmd = [sys.executable, "-m", "botsdock_connector"]
     # sys.argv[0] is the program name, sys.argv[1:] are the actual args.
     for arg in sys.argv[1:]:
-        if arg in {"start", "restart", "stop", "status"}:
+        if arg in {"start", "restart"}:
             continue
         cmd.append(arg)
     return cmd

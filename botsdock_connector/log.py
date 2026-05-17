@@ -32,4 +32,5 @@ def init_logging() -> None:
 
 def get_logger(name: str) -> logging.Logger:
     init_logging()
-    return logging.getLogger(f"botsdock_connector.{name}")
+    # Callers pass __name__, which already includes the package prefix.
+    return logging.getLogger(name)
