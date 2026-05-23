@@ -107,6 +107,27 @@ def _get_package_version_via_subprocess() -> str | None:
         return None
 
 
+def _parse_successfully_installed_version(output: str) -> str | None:
+    """Parse pip's confirmed installed botsdock-connector version."""
+    prefix = "botsdock-connector-"
+    for line in output.splitlines():
+        marker = "Successfully installed "
+        if marker not in line:
+            continue
+        installed = line.split(marker, 1)[1]
+        for token in installed.split():
+            normalized = token.lower().replace("_", "-")
+            if normalized.startswith(prefix):
+                return token[len(prefix):]
+    return None
+
+
+def _write_process_output(output: str, *, file: object) -> None:
+    if not output:
+        return
+    print(output, end="" if output.endswith("\n") else "\n", file=file)
+
+
 def run_upgrade(args: argparse.Namespace) -> int:
     if not _check_pip_version():
         return 1
@@ -129,9 +150,13 @@ def run_upgrade(args: argparse.Namespace) -> int:
     print(f"botsdock connector upgrade command: {printable}", file=sys.stderr)
     if args.dry_run:
         return 0
-    result = subprocess.run(command)
+    result = subprocess.run(command, capture_output=True, text=True)
+    _write_process_output(result.stdout, file=sys.stdout)
+    _write_process_output(result.stderr, file=sys.stderr)
     if result.returncode == 0:
-        new_version = _get_package_version_via_subprocess()
+        new_version = _parse_successfully_installed_version(
+            f"{result.stdout}\n{result.stderr}"
+        ) or _get_package_version_via_subprocess()
         if new_version:
             if old_version and old_version != new_version:
                 print(
