@@ -978,7 +978,7 @@ class AgentConnectorMux:
         for runtime in self.runtimes.values():
             app_server = runtime.get("app_server")
             if app_server is not None:
-                app_server.close()
+                await asyncio.to_thread(app_server.close)
 
     def _select_runtime(self, provider: str | None) -> JsonDict | None:
         if provider and provider in self.runtimes:
@@ -1114,7 +1114,7 @@ async def run_agent_provider_session(
         }
     except Exception as exc:
         if codex_app_server is not None:
-            codex_app_server.close()
+            await asyncio.to_thread(codex_app_server.close)
         codex_app_server = None
         codex_connector = None
         _log_runtime_warning(args, "codex runtime unavailable: %s", exc)
