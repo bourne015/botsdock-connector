@@ -1055,7 +1055,7 @@ async def run_agent_provider_session(
     machine_id: str,
 ) -> None:
     loop = asyncio.get_running_loop()
-    outbound: asyncio.Queue[JsonDict] = asyncio.Queue()
+    outbound: asyncio.Queue[JsonDict] = asyncio.Queue(maxsize=1000)
     runtimes: dict[str, JsonDict] = {}
     provider_runtimes: list[JsonDict] = []
 
