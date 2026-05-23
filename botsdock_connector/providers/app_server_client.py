@@ -65,6 +65,13 @@ class AppServerProcessClient:
         self._stdout_thread.start()
         self._stderr_thread.start()
 
+    def __del__(self) -> None:
+        try:
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.send_signal(signal.SIGTERM)
+        except Exception:
+            pass
+
     def is_alive(self) -> bool:
         return self.proc.poll() is None
 
