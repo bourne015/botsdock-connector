@@ -175,6 +175,7 @@ def daemon_start(args: Any) -> int:
         stdout=log_fd,
         stderr=subprocess.STDOUT,
     )
+    log_fd.close()
 
     # Brief wait to catch immediate launch failures.
     time.sleep(START_CHECK_DELAY)
@@ -184,7 +185,6 @@ def daemon_start(args: Any) -> int:
             f"Check log: {log_path}",
             file=sys.stderr,
         )
-        log_fd.close()
         return 1
 
     _write_pid_data(proc.pid, server, cwd, machine_ids)
