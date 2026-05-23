@@ -686,6 +686,7 @@ class ClaudeAgentSdkProvider:
                     pass
         self._active_clients.clear()
         self._cancel_events.clear()
+        self._pending_approvals.clear()
         self._auth_required_turns.clear()
         self._sdk = None
         self._sdk_types = None
