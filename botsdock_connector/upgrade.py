@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import re
 import shlex
 import subprocess
 import sys
@@ -14,6 +15,10 @@ logger = get_logger(__name__)
 
 PYPI_UPGRADE_SPEC = "botsdock-connector"
 GITHUB_UPGRADE_SPEC = "git+https://github.com/bourne015/botsdock-connector.git"
+CONNECTOR_VERSION_PATTERN = re.compile(
+    r"botsdock[-_]connector-(?P<version>\d+(?:\.\d+)+(?:[A-Za-z0-9.!+_]*)?)",
+    re.IGNORECASE,
+)
 
 
 def _parse_pip_version(version_string: str) -> tuple[int, ...] | None:
@@ -109,17 +114,54 @@ def _get_package_version_via_subprocess() -> str | None:
 
 def _parse_successfully_installed_version(output: str) -> str | None:
     """Parse pip's confirmed installed botsdock-connector version."""
-    prefix = "botsdock-connector-"
     for line in output.splitlines():
         marker = "Successfully installed "
         if marker not in line:
             continue
-        installed = line.split(marker, 1)[1]
-        for token in installed.split():
-            normalized = token.lower().replace("_", "-")
-            if normalized.startswith(prefix):
-                return token[len(prefix):]
+        version = _parse_connector_version_from_text(line)
+        if version:
+            return version
     return None
+
+
+def _parse_connector_version_from_text(text: str) -> str | None:
+    match = CONNECTOR_VERSION_PATTERN.search(text)
+    return match.group("version") if match else None
+
+
+def _parse_created_wheel_version(output: str) -> str | None:
+    for line in output.splitlines():
+        if "Created wheel for botsdock-connector:" not in line:
+            continue
+        version = _parse_connector_version_from_text(line)
+        if version:
+            return version
+    return None
+
+
+def _parse_pip_reported_version(output: str) -> str | None:
+    return _parse_successfully_installed_version(output) or _parse_created_wheel_version(
+        output
+    )
+
+
+def _is_stale_metadata_version(
+    *,
+    old_version: str | None,
+    metadata_version: str,
+    args: argparse.Namespace,
+) -> bool:
+    if args.version or args.package_spec:
+        return False
+    if not old_version:
+        return False
+    old_parsed = _parse_pip_version(old_version)
+    metadata_parsed = _parse_pip_version(metadata_version)
+    return (
+        old_parsed is not None
+        and metadata_parsed is not None
+        and metadata_parsed < old_parsed
+    )
 
 
 def _write_process_output(output: str, *, file: object) -> None:
@@ -154,9 +196,22 @@ def run_upgrade(args: argparse.Namespace) -> int:
     _write_process_output(result.stdout, file=sys.stdout)
     _write_process_output(result.stderr, file=sys.stderr)
     if result.returncode == 0:
-        new_version = _parse_successfully_installed_version(
-            f"{result.stdout}\n{result.stderr}"
-        ) or _get_package_version_via_subprocess()
+        pip_output = f"{result.stdout}\n{result.stderr}"
+        new_version = _parse_pip_reported_version(pip_output)
+        if not new_version:
+            metadata_version = _get_package_version_via_subprocess()
+            if metadata_version and _is_stale_metadata_version(
+                old_version=old_version,
+                metadata_version=metadata_version,
+                args=args,
+            ):
+                print(
+                    "botsdock connector upgrade: ignoring stale installed-version "
+                    f"metadata ({metadata_version}); pip completed successfully.",
+                    file=sys.stderr,
+                )
+            else:
+                new_version = metadata_version
         if new_version:
             if old_version and old_version != new_version:
                 print(
