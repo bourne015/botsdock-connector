@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "botsdock-connector"
-version = "0.1.12"
+version = "0.1.13"
 description = "Provider-neutral connector for BotsDock Agent Workbench"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "MIT"}
