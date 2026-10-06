@@ -1158,6 +1158,9 @@ class ClaudeAgentSdkProvider:
                 if client is not None:
                     self._active_clients.pop(turn_id, None)
                 self._cancel_events.pop(turn_id, None)
+                for key in list(self._tool_uses):
+                    if key[0] == turn_id:
+                        self._tool_uses.pop(key, None)
                 await queue.put(None)
 
         task = asyncio.create_task(run_sdk())
