@@ -68,3 +68,17 @@ def test_snapshot_block_ids_are_distinct():
     message.uuid = "transcript-1"
     events = provider.map_message({}, message)
     assert [e.provider_event_id for e in events] == ["transcript-1:0", "transcript-1:1"]
+
+def test_current_sdk_options_and_tool_result_types():
+    sdk = pytest.importorskip('claude_agent_sdk')
+    from claude_agent_sdk.types import AssistantMessage, ToolUseBlock, UserMessage, ToolResultBlock
+    provider = ClaudeAgentSdkProvider(cwd='/tmp')
+    provider._sdk = sdk
+    options = provider._build_options({'reasoning_effort': 'xhigh'}, cwd=Path('/tmp'), can_use_tool=None)
+    assert isinstance(options, sdk.ClaudeAgentOptions)
+    assert options.effort == 'xhigh'
+    assert options.include_partial_messages is True
+    request = {'turn_id': 't'}
+    provider.map_message(request, AssistantMessage(content=[ToolUseBlock('sdk-tool', 'Bash', {'command': 'pwd'})], model='claude'))
+    result = provider.map_message(request, UserMessage(content=[ToolResultBlock('sdk-tool', 'ok')]))
+    assert [e.type for e in result] == ['command.output', 'command.completed']

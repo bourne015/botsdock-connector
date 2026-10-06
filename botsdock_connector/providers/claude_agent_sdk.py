@@ -1296,7 +1296,7 @@ class ClaudeAgentSdkProvider:
             kwargs["model"] = model
         if provider_session_id:
             kwargs["resume"] = provider_session_id
-        if reasoning_effort in {"low", "medium", "high", "max"}:
+        if reasoning_effort in {"low", "medium", "high", "xhigh", "max"}:
             kwargs["effort"] = reasoning_effort
         return self._sdk.ClaudeAgentOptions(**kwargs)
 
