@@ -13,26 +13,19 @@ runtimes available on that machine over a single WebSocket connection.
 
 ## Installation
 
-Until the package is published to PyPI, install from GitHub:
+On macOS and Linux, install into a dedicated virtual environment (Python 3.10+
+and Git are required). Download and run the standalone installer:
 
 ```bash
-python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
+installer=$(mktemp)
+curl -fsSL https://raw.githubusercontent.com/bourne015/botsdock-connector/main/botsdock_connector/install.py -o "$installer" && python3 "$installer"
+rm -f "$installer"
+export PATH="$HOME/.botsdock/connector/current/bin:$PATH"
 ```
 
-After installation, make sure `~/.local/bin` is on your `PATH`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-> **pip too old?** If the install produces an `UNKNOWN-0.0.0` wheel, your pip is
-> ≤ 22.0.2. Upgrade pip first:
->
-> ```bash
-> python3 -m pip uninstall -y UNKNOWN
-> python3 -m pip install --user --upgrade "pip>22.0.2"
-> python3 -m pip install --user --upgrade git+https://github.com/bourne015/botsdock-connector.git
-> ```
+The installer does not modify the system Python or your saved machine credentials.
+For development or Windows, use a manually created virtual environment and install
+with `python -m pip install git+https://github.com/bourne015/botsdock-connector.git`.
 
 ## Upgrade
 
