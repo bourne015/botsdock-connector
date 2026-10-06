@@ -82,3 +82,34 @@ def test_current_sdk_options_and_tool_result_types():
     provider.map_message(request, AssistantMessage(content=[ToolUseBlock('sdk-tool', 'Bash', {'command': 'pwd'})], model='claude'))
     result = provider.map_message(request, UserMessage(content=[ToolResultBlock('sdk-tool', 'ok')]))
     assert [e.type for e in result] == ['command.output', 'command.completed']
+
+@pytest.mark.parametrize("decision", ["accept", "decline"])
+def test_sdk_questions_receive_answers_or_rejection(decision):
+    import asyncio
+    sdk = pytest.importorskip('claude_agent_sdk')
+    import claude_agent_sdk.types as sdk_types
+    async def run():
+        provider = ClaudeAgentSdkProvider(cwd='/tmp')
+        provider._sdk, provider._sdk_types = sdk, sdk_types
+        queue = asyncio.Queue()
+        inputs = {'questions': [{'question': 'Choose?', 'header': 'Choice', 'options': [{'label': 'A'}, {'label': 'B'}], 'multiSelect': True}]}
+        callback = provider._build_permission_handler({}, queue)
+        task = asyncio.create_task(callback('AskUserQuestion', inputs, {}))
+        event = await queue.get()
+        assert event.payload['approval_method'] == 'claude/askUserQuestion'
+        assert event.payload['questions'] == inputs['questions']
+        request = {'app_server_request_id': event.payload['app_server_request_id'], 'decision': decision, 'response': {'answers': {'Choose?': 'A, B'}}}
+        if decision == 'accept':
+            with pytest.raises(ValueError, match='invalid_user_input_answers'):
+                await provider.resolve_approval({**request, 'response': {'answers': {}}})
+            assert not task.done()
+        await provider.resolve_approval(request)
+        result = await task
+        if decision == 'accept':
+            assert result.updated_input == {**inputs, 'answers': {'Choose?': 'A, B'}}
+        else:
+            assert result.behavior == 'deny'
+        assert not provider._pending_questions
+        options = provider._build_options({}, cwd=Path('/tmp'), can_use_tool=callback)
+        assert options.hooks['PreToolUse']
+    asyncio.run(run())

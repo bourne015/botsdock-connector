@@ -1113,6 +1113,8 @@ def test_claude_execution_options_reject_unsupported_values():
             return kwargs
     provider = ClaudeAgentSdkProvider(cwd=".")
     provider._sdk = FakeSdk()
+    from types import SimpleNamespace
+    provider._sdk_types = SimpleNamespace(HookMatcher=lambda **kwargs: kwargs)
     for payload in [{"sandbox": "read-only"}, {"approval_policy": "untrusted"}]:
         try:
             provider._build_options({"payload": payload}, cwd=Path("."), can_use_tool=None)

@@ -809,7 +809,7 @@ class ClaudeCodeConnector:
             try:
                 envelope = await self.provider.resolve_approval(payload)
             except ValueError as exc:
-                return error_response(request_id, "approval_request_not_found", str(exc))
+                return error_response(request_id, "invalid_user_input_answers" if str(exc) == "invalid_user_input_answers" else "approval_request_not_found", str(exc))
             await self.outbound.put(
                 envelope_to_backend_message(envelope, payload, request_id=request_id)
             )

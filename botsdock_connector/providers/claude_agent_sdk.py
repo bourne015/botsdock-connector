@@ -660,6 +660,7 @@ class ClaudeAgentSdkProvider:
         self._active_clients: dict[str, Any] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._pending_approvals: dict[str, asyncio.Future[JsonDict]] = {}
+        self._pending_questions: dict[str, JsonDict] = {}
         self._auth_required_turns: set[str] = set()
         self._tool_uses: dict[tuple[str | None, str | None], JsonDict] = {}
 
@@ -1208,7 +1209,16 @@ class ClaudeAgentSdkProvider:
         future = self._pending_approvals.get(app_server_request_id or "")
         if future is None or future.done():
             raise ValueError("approval_request_not_found")
-        future.set_result(dict(request.get("payload") or request))
+        response = dict(request.get("payload") or request)
+        questions = self._pending_questions.get(app_server_request_id or "")
+        if questions is not None and _approval_decision_allows(response):
+            answers = (response.get("response") or {}).get("answers")
+            if not isinstance(answers, dict) or any(
+                not isinstance(answers.get(q["question"]), str) or not answers[q["question"]].strip()
+                for q in questions.get("questions", [])
+            ):
+                raise ValueError("invalid_user_input_answers")
+        future.set_result(response)
         return self._envelope(
             "approval.resolved",
             request,
@@ -1290,6 +1300,10 @@ class ClaudeAgentSdkProvider:
             "env": self._claude_env_overrides(),
             "can_use_tool": None if permission_mode == "dontAsk" else can_use_tool,
         }
+        if can_use_tool is not None and permission_mode != "dontAsk":
+            async def keep_permission_stream_open(input_data, tool_use_id, context):
+                return {"continue_": True}
+            kwargs["hooks"] = {"PreToolUse": [self._sdk_types.HookMatcher(matcher=None, hooks=[keep_permission_stream_open])]}
         if self.cli_path:
             kwargs["cli_path"] = self.cli_path
         if model:
@@ -1355,6 +1369,14 @@ class ClaudeAgentSdkProvider:
                 payload["command_preview"] = command
                 payload["kind"] = "command"
                 payload["approval_method"] = _COMMAND_APPROVAL_METHOD
+            if tool_name == "AskUserQuestion":
+                self._pending_questions[provider_request_id] = input_data
+                payload.update({
+                    "kind": "user_input", "approval_method": "claude/askUserQuestion",
+                    "title": "Claude Code is waiting for your answers",
+                    "questions": _jsonable(input_data.get("questions", [])),
+                    "available_decisions": ["accept", "decline"],
+                })
             await queue.put(self._envelope("approval.requested", request, payload))
             try:
                 response = await asyncio.wait_for(
@@ -1368,8 +1390,14 @@ class ClaudeAgentSdkProvider:
                 )
             finally:
                 self._pending_approvals.pop(provider_request_id, None)
+                self._pending_questions.pop(provider_request_id, None)
 
             if _approval_decision_allows(response):
+                if tool_name == "AskUserQuestion":
+                    answers = response["response"]["answers"]
+                    return self._sdk_types.PermissionResultAllow(updated_input={
+                        **input_data, "answers": {q["question"]: answers[q["question"]] for q in input_data.get("questions", [])},
+                    })
                 return self._sdk_types.PermissionResultAllow()
             return self._sdk_types.PermissionResultDeny(
                 message=_string(response.get("message")) or "Denied by user",
