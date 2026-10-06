@@ -1286,6 +1286,7 @@ class ClaudeAgentSdkProvider:
             "allowed_tools": list(_AUTO_ALLOW_TOOLS),
             "permission_mode": permission_mode,
             "setting_sources": ["user", "project", "local"],
+            "include_partial_messages": True,
             "env": self._claude_env_overrides(),
             "can_use_tool": None if permission_mode == "dontAsk" else can_use_tool,
         }
@@ -1389,9 +1390,10 @@ class ClaudeAgentSdkProvider:
             return envelopes
         message_id = _string(getattr(message, "message_id", None))
         model = _string(getattr(message, "model", None))
-        for block in content:
+        for index, block in enumerate(content):
             block_type = type(block).__name__
-            provider_event_id = _string(getattr(block, "id", None)) or message_id
+            transcript_id = _string(getattr(message, "uuid", None)) or message_id
+            provider_event_id = _string(getattr(block, "id", None)) or (f"{transcript_id}:{index}" if transcript_id else None)
             if block_type == "TextBlock":
                 text = _string(getattr(block, "text", None))
                 if _is_auth_required_text(text):
