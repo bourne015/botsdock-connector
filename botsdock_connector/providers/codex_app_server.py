@@ -577,7 +577,7 @@ class CodexConnector:
         limit = max(1, min(limit, 50))
         cursor = payload.get("cursor")
         direction = payload.get("direction") or ("older" if cursor else "latest")
-        params: JsonDict = {"threadId": app_thread_id, "limit": limit, "sortDirection": "desc"}
+        params: JsonDict = {"threadId": app_thread_id, "limit": limit, "sortDirection": "desc", "itemsView": "full"}
         if cursor:
             params["cursor"] = cursor
         started_at = time.monotonic()

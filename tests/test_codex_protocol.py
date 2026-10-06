@@ -29,3 +29,9 @@ def test_current_item_deltas(method, event):
     assert kind == event
     assert payload["item_id"] == "i"
     assert payload["text"] == "hello"
+
+def test_history_requests_full_items():
+    server = FakeServer()
+    connector = CodexConnector(app_server=server, cwd="/tmp")
+    connector._handle_thread_history({"app_server_thread_id": "up-thread"})
+    assert server.last[1]["itemsView"] == "full"
