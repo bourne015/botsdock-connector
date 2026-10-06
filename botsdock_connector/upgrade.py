@@ -85,7 +85,7 @@ def build_upgrade_pip_args(args: argparse.Namespace) -> list[str]:
         command.append("--user")
     if args.pre:
         command.append("--pre")
-    if args.force_reinstall:
+    if args.force_reinstall or package_spec.startswith("git+"):
         command.append("--force-reinstall")
     command.extend(str(item) for item in (args.pip_arg or []))
     command.append(package_spec)
