@@ -313,7 +313,7 @@ class CodexConnector:
             ],
             "approvalPolicy": payload.get("approval_policy") or "on-request",
             "approvalsReviewer": "user",
-            "sandboxPolicy": _sandbox_policy(payload.get("cwd") or self.cwd),
+            **({"sandboxPolicy": _sandbox_policy(payload.get("cwd") or self.cwd, payload["sandbox"])} if payload.get("sandbox") else {}),
         }
         model = payload.get("model") or self.model
         if model:
@@ -1405,11 +1405,16 @@ def _command_preview(params: JsonDict) -> str | None:
     return None
 
 
-def _sandbox_policy(cwd: str) -> JsonDict:
+def _sandbox_policy(cwd: str, sandbox: str = "workspace-write") -> JsonDict:
+    if sandbox == "read-only":
+        return {"type": "readOnly"}
+    if sandbox == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    if sandbox != "workspace-write":
+        raise ConnectorError("unsupported Codex sandbox option")
     return {
         "type": "workspaceWrite",
         "writableRoots": [cwd],
-        "permissionProfile": "restricted",
         "networkAccess": False,
         "excludeTmpdirEnvVar": False,
         "excludeSlashTmp": False,
