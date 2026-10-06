@@ -341,7 +341,7 @@ class CodexConnector:
             "turn/steer",
             {
                 "threadId": app_thread_id,
-                "turnId": app_turn_id,
+                "expectedTurnId": app_turn_id,
                 "input": [
                     {
                         "type": "text",
