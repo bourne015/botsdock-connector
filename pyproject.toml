@@ -12,11 +12,13 @@ requires-python = ">=3.10"
 dependencies = [
     "claude-agent-sdk>=0.2.163,<0.3",
     "websockets>=16,<17",
+    "jsonschema>=4.26,<5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "pytest-asyncio>=0.23",
 ]
 
 [project.urls]

@@ -214,15 +214,24 @@ The connector wire protocol is `0.1`. Unknown versions returned by the server ar
 rejected; legacy 0.1 servers that omit the response version remain supported.
 
 Before making Codex available, the installed binary exports its JSON Schema.
-Core thread, turn, and history methods must exist. Stable API is preferred;
+Core thread, turn, steering, history, and model methods must exist. The generated
+parameter schemas validate outgoing requests, including `expectedTurnId` and
+`itemsView: full`. Stable API is preferred;
 experimental API is enabled only when the installed version needs it for a core
 method. Repair or upgrade Codex if schema export fails or methods are missing.
-This check does not replace an end-to-end smoke after a CLI upgrade.
+This check does not replace an end-to-end smoke after a CLI upgrade. Models and
+supported reasoning efforts are read from the runtime catalog, not a fixed list.
+Console auto-review maps to `on-request` plus reviewer `auto_review`; full access
+maps to `danger-full-access` plus approval policy `never`.
 
 Claude uses local user/project/local permission rules. Locally allowed tools can
 skip web approval. Codex sandbox values are rejected for Claude; supported approval
 policies are `on-request` and `never` (`dontAsk`, which denies required prompts).
 Stale or completed approvals are rejected instead of acknowledged as resolved.
+Claude SDK 0.2.163 or later is required (below 0.3). Partial messages are enabled;
+tool results are read from SDK user messages. `AskUserQuestion` uses a dedicated
+question form on the existing pending-request channel and returns the original
+questions plus answers to the SDK. It is not a permission grant.
 Codex user-input and MCP elicitation requests are currently rejected explicitly;
 unsupported records preserve their questions and do not block the web console.
 

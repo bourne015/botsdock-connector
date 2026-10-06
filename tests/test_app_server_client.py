@@ -50,11 +50,15 @@ def test_runtime_schema_checks_required_stable_methods(monkeypatch):
     from types import SimpleNamespace
     from botsdock_connector.providers.app_server_client import AppServerError
     required = ["initialize", "thread/list", "thread/start", "thread/resume",
-                "thread/turns/list", "turn/start", "turn/interrupt", "thread/archive"]
+                "thread/turns/list", "turn/start", "turn/steer", "turn/interrupt", "thread/archive", "model/list"]
     def export(args, **kwargs):
         Path(args[args.index("--out") + 1], "ClientRequest.json").write_text(json.dumps({
             "oneOf": [{"properties": {"method": {"enum": [method]}}} for method in required],
         }))
+        for title, field in [("TurnSteerParams", "expectedTurnId"), ("ThreadTurnsListParams", "itemsView")]:
+            Path(args[args.index("--out") + 1], title + ".json").write_text(json.dumps({
+                "title": title, "properties": {field: {"type": "string"}},
+            }))
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr("subprocess.run", export)
     client = AppServerProcessClient.__new__(AppServerProcessClient)
@@ -82,7 +86,25 @@ def test_initialize_uses_stable_protocol():
 def test_runtime_enables_experimental_history_only_when_needed(monkeypatch):
     client = AppServerProcessClient.__new__(AppServerProcessClient)
     stable = {"initialize", "thread/list", "thread/start", "thread/resume",
-              "turn/start", "turn/interrupt", "thread/archive"}
-    client._runtime_methods = lambda experimental: stable | ({"thread/turns/list"} if experimental else set())
+              "turn/start", "turn/steer", "turn/interrupt", "thread/archive", "model/list"}
+    def methods(*, experimental):
+        client._parameter_schemas.update({"turn/steer": {"properties": {"expectedTurnId": {}}}, "thread/turns/list": {"properties": {"itemsView": {}}}})
+        return stable | ({"thread/turns/list"} if experimental else set())
+    client._runtime_methods = methods
     client._check_runtime_compatibility()
     assert client._experimental_api is True
+
+
+def test_same_method_names_do_not_hide_incompatible_parameters():
+    from botsdock_connector.providers.app_server_client import AppServerError
+    client = AppServerProcessClient.__new__(AppServerProcessClient)
+    client._runtime_methods = lambda experimental: {"initialize", "thread/list", "thread/start", "thread/resume", "thread/turns/list", "turn/start", "turn/steer", "turn/interrupt", "thread/archive", "model/list"}
+    with pytest.raises(AppServerError, match="expectedTurnId"):
+        client._check_runtime_compatibility()
+
+def test_outgoing_requests_validate_installed_schema_before_dispatch():
+    from botsdock_connector.providers.app_server_client import AppServerError
+    client = AppServerProcessClient.__new__(AppServerProcessClient)
+    client._parameter_schemas = {"turn/steer": {"type": "object", "required": ["expectedTurnId"], "properties": {"expectedTurnId": {"type": "string"}}}}
+    with pytest.raises(AppServerError, match="turn/steer"):
+        client.request("turn/steer", {"turnId": "obsolete"})

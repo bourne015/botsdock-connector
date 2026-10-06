@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from jsonschema import Draft7Validator
+
 from .. import __version__
 from ..log import get_logger
 
@@ -94,11 +96,11 @@ class AppServerProcessClient:
                 thread.join(timeout=3)
 
     def _check_runtime_compatibility(self) -> None:
-        # History was experimental in older Codex versions. Opt in only when
-        # the installed binary requires it for our core methods.
+        # Export the installed protocol, including experimental history when needed.
+        self._parameter_schemas: dict[str, JsonDict] = {}
         required = {
             "initialize", "thread/list", "thread/start", "thread/resume",
-            "thread/turns/list", "turn/start", "turn/interrupt", "thread/archive",
+            "thread/turns/list", "turn/start", "turn/steer", "turn/interrupt", "thread/archive", "model/list",
         }
         self._experimental_api = False
         missing = required - self._runtime_methods(experimental=False)
@@ -107,6 +109,10 @@ class AppServerProcessClient:
             if missing:
                 raise AppServerError("Codex protocol is missing required methods: " + ", ".join(sorted(missing)))
             self._experimental_api = True
+        for method, field in [("turn/steer", "expectedTurnId"), ("thread/turns/list", "itemsView")]:
+            schema = self._parameter_schemas.get(method, {})
+            if field not in schema.get("properties", {}):
+                raise AppServerError(f"Codex protocol is missing {method}.{field}; update the local Codex installation")
 
     def _runtime_methods(self, *, experimental: bool) -> set[str]:
         with tempfile.TemporaryDirectory(prefix="botsdock-codex-schema-") as directory:
@@ -133,8 +139,20 @@ class AppServerProcessClient:
                     for child in value:
                         visit(child)
 
+            parameter_methods = {
+                "InitializeParams": "initialize", "ThreadListParams": "thread/list",
+                "ThreadStartParams": "thread/start", "ThreadResumeParams": "thread/resume",
+                "ThreadTurnsListParams": "thread/turns/list", "TurnStartParams": "turn/start",
+                "TurnSteerParams": "turn/steer", "TurnInterruptParams": "turn/interrupt",
+                "ThreadArchiveParams": "thread/archive", "ThreadUnarchiveParams": "thread/unarchive",
+                "ModelListParams": "model/list", "AccountReadParams": "account/read",
+            }
             for path in Path(directory).rglob("*.json"):
-                visit(json.loads(path.read_text()))
+                schema = json.loads(path.read_text())
+                visit(schema)
+                method = parameter_methods.get(schema.get("title"))
+                if method:
+                    self._parameter_schemas[method] = schema
             return methods
 
     def initialize(self) -> JsonDict:
@@ -156,6 +174,12 @@ class AppServerProcessClient:
         return response
 
     def request(self, method: str, params: Any | None = None) -> JsonDict:
+        schema = getattr(self, "_parameter_schemas", {}).get(method)
+        if schema:
+            error = next(Draft7Validator(schema).iter_errors(params if params is not None else {}), None)
+            if error:
+                field = ".".join(str(part) for part in error.path) or "params"
+                raise AppServerError(f"Codex protocol does not support {method}.{field}; update the connector or local Codex installation")
         request_id = self._allocate_id()
         pending: queue.Queue[JsonDict] = queue.Queue(maxsize=1)
         with self._pending_lock:
