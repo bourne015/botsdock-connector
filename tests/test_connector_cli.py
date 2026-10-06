@@ -1030,7 +1030,7 @@ def test_missing_claude_sdk_is_reported_as_turn_failed() -> None:
     assert events[0].payload["error"] == "provider_runtime_missing"
 
 
-def test_codex_app_server_initializes_experimental_api_capability() -> None:
+def test_codex_app_server_initializes_negotiated_experimental_api_capability() -> None:
     class FakeAppServer(AppServerProcessClient):
         def __init__(self) -> None:
             self.requests = []
@@ -1044,6 +1044,7 @@ def test_codex_app_server_initializes_experimental_api_capability() -> None:
             self.notifications.append((method, params))
 
     app_server = FakeAppServer()
+    app_server._experimental_api = True
 
     result = app_server.initialize()
 

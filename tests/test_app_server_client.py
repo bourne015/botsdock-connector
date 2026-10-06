@@ -43,3 +43,46 @@ def test_concurrent_id_allocation_is_thread_safe():
     for t in threads_list:
         t.join()
     assert sorted(ids) == list(range(1, 11))
+
+
+def test_runtime_schema_checks_required_stable_methods(monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from botsdock_connector.providers.app_server_client import AppServerError
+    required = ["initialize", "thread/list", "thread/start", "thread/resume",
+                "thread/turns/list", "turn/start", "turn/interrupt", "thread/archive"]
+    def export(args, **kwargs):
+        Path(args[args.index("--out") + 1], "ClientRequest.json").write_text(json.dumps({
+            "oneOf": [{"properties": {"method": {"enum": [method]}}} for method in required],
+        }))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr("subprocess.run", export)
+    client = AppServerProcessClient.__new__(AppServerProcessClient)
+    client.codex_bin, client.cwd, client.timeout = "codex", ".", 10
+    client._check_runtime_compatibility()
+    assert client._experimental_api is False
+    required.remove("thread/turns/list")
+    with pytest.raises(AppServerError, match="thread/turns/list"):
+        client._check_runtime_compatibility()
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: SimpleNamespace(returncode=1))
+    with pytest.raises(AppServerError, match="repair"):
+        client._check_runtime_compatibility()
+
+
+def test_initialize_uses_stable_protocol():
+    client = AppServerProcessClient.__new__(AppServerProcessClient)
+    calls = []
+    client.request = lambda method, params: calls.append((method, params)) or {"userAgent": "codex"}
+    client.notification = lambda method: calls.append((method, None))
+    client.initialize()
+    assert calls[0][1]["capabilities"]["experimentalApi"] is False
+    assert calls[1][0] == "initialized"
+
+
+def test_runtime_enables_experimental_history_only_when_needed(monkeypatch):
+    client = AppServerProcessClient.__new__(AppServerProcessClient)
+    stable = {"initialize", "thread/list", "thread/start", "thread/resume",
+              "turn/start", "turn/interrupt", "thread/archive"}
+    client._runtime_methods = lambda experimental: stable | ({"thread/turns/list"} if experimental else set())
+    client._check_runtime_compatibility()
+    assert client._experimental_api is True

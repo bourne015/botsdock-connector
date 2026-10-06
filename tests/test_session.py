@@ -149,3 +149,11 @@ def test_protocol_constants():
 
 
 # SessionConfig removed — unused abstraction
+
+
+def test_server_protocol_rejects_unknown_versions():
+    from botsdock_connector.protocol import validate_server_protocol
+    validate_server_protocol({})
+    validate_server_protocol({"protocol_version": "0.1"})
+    with pytest.raises(ConnectorError, match="unsupported server protocol"):
+        validate_server_protocol({"protocol_version": "0.2"})

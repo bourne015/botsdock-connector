@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .log import get_logger
-from .protocol import CONNECTION_MODE, PROTOCOL_VERSION
+from .protocol import CONNECTION_MODE, PROTOCOL_VERSION, validate_server_protocol
 from .token_store import (
     ConnectorError,
     save_connector_token,
@@ -96,6 +96,7 @@ async def send_bootstrap(websocket: Any, args: Any) -> JsonDict:
     response = json.loads(await websocket.recv())
     if response.get("type") != "connector.bootstrap":
         raise ConnectorError(f"connector bootstrap rejected: {response}")
+    validate_server_protocol(response)
     return response
 
 

@@ -23,7 +23,7 @@ from .daemon import (
     install_signal_handlers,
 )
 from .log import get_logger
-from .protocol import CONNECTION_MODE, PROTOCOL_VERSION
+from .protocol import validate_server_protocol, CONNECTION_MODE, PROTOCOL_VERSION
 from .providers.claude_agent_sdk import ClaudeAgentSdkProvider, _runtime_profile_log_line, _should_warn_missing_claude_env
 from .register import run_register
 from .providers.codex_app_server import (
@@ -1181,6 +1181,7 @@ async def run_agent_provider_session(
     accepted = json.loads(await websocket.recv())
     if accepted.get("type") != "connector.accepted":
         raise ConnectorError(f"connector rejected: {accepted}")
+    validate_server_protocol(accepted)
 
     async def accepted_handler(accepted_msg: JsonDict) -> None:
         await save_token(

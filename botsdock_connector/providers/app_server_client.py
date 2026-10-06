@@ -7,6 +7,7 @@ import queue
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,7 @@ class AppServerProcessClient:
         self._pending_lock = threading.Lock()
         self._stderr_lines: queue.Queue[str] = queue.Queue()
         self._closed = False
+        self._check_runtime_compatibility()
         self.proc = subprocess.Popen(
             [codex_bin, "app-server", "--listen", "stdio://"],
             cwd=self.cwd,
@@ -91,6 +93,50 @@ class AppServerProcessClient:
             if thread.is_alive():
                 thread.join(timeout=3)
 
+    def _check_runtime_compatibility(self) -> None:
+        # History was experimental in older Codex versions. Opt in only when
+        # the installed binary requires it for our core methods.
+        required = {
+            "initialize", "thread/list", "thread/start", "thread/resume",
+            "thread/turns/list", "turn/start", "turn/interrupt", "thread/archive",
+        }
+        self._experimental_api = False
+        missing = required - self._runtime_methods(experimental=False)
+        if missing:
+            missing -= self._runtime_methods(experimental=True)
+            if missing:
+                raise AppServerError("Codex protocol is missing required methods: " + ", ".join(sorted(missing)))
+            self._experimental_api = True
+
+    def _runtime_methods(self, *, experimental: bool) -> set[str]:
+        with tempfile.TemporaryDirectory(prefix="botsdock-codex-schema-") as directory:
+            command = [self.codex_bin, "app-server", "generate-json-schema", "--out", directory]
+            if experimental:
+                command.append("--experimental")
+            result = subprocess.run(
+                command, cwd=self.cwd, capture_output=True, text=True, timeout=self.timeout,
+            )
+            if result.returncode:
+                raise AppServerError("Codex schema export failed; update or repair the local Codex installation")
+            methods: set[str] = set()
+
+            def visit(value: Any) -> None:
+                if isinstance(value, dict):
+                    method = value.get("properties", {}).get("method", {})
+                    if isinstance(method, dict):
+                        methods.update(item for item in method.get("enum", []) if isinstance(item, str))
+                        if isinstance(method.get("const"), str):
+                            methods.add(method["const"])
+                    for child in value.values():
+                        visit(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        visit(child)
+
+            for path in Path(directory).rglob("*.json"):
+                visit(json.loads(path.read_text()))
+            return methods
+
     def initialize(self) -> JsonDict:
         response = self.request(
             "initialize",
@@ -101,7 +147,7 @@ class AppServerProcessClient:
                     "version": __version__,
                 },
                 "capabilities": {
-                    "experimentalApi": True,
+                    "experimentalApi": getattr(self, "_experimental_api", False),
                     "optOutNotificationMethods": [],
                 },
             },
