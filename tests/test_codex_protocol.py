@@ -35,3 +35,16 @@ def test_history_requests_full_items():
     connector = CodexConnector(app_server=server, cwd="/tmp")
     connector._handle_thread_history({"app_server_thread_id": "up-thread"})
     assert server.last[1]["itemsView"] == "full"
+
+@pytest.mark.parametrize("policy,expected,reviewer", [("auto-review", "on-request", "auto_review"), ("never", "never", "user"), ("always-allow", "never", "user"), ("on-failure", "on-request", "user")])
+def test_permission_modes_use_official_fields(policy, expected, reviewer):
+    connector = CodexConnector(app_server=FakeServer(), cwd="/tmp")
+    params = connector._turn_start_params("t", "hello", {"approval_policy": policy})
+    assert params["approvalPolicy"] == expected
+    assert params["approvalsReviewer"] == reviewer
+
+def test_resume_without_policy_does_not_override_local_reviewer():
+    connector = CodexConnector(app_server=FakeServer(), cwd="/tmp")
+    params = connector._turn_start_params("t", "hello", {})
+    assert "approvalPolicy" not in params
+    assert "approvalsReviewer" not in params

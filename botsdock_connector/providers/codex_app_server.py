@@ -311,8 +311,7 @@ class CodexConnector:
                     "text_elements": [],
                 }
             ],
-            "approvalPolicy": payload.get("approval_policy") or "on-request",
-            "approvalsReviewer": "user",
+            **_approval_params(payload),
             **({"sandboxPolicy": _sandbox_policy(payload.get("cwd") or self.cwd, payload["sandbox"])} if payload.get("sandbox") else {}),
         }
         model = payload.get("model") or self.model
@@ -362,8 +361,7 @@ class CodexConnector:
         cwd = payload.get("cwd") or self.cwd
         params: JsonDict = {
             "cwd": cwd,
-            "approvalPolicy": payload.get("approval_policy") or "on-request",
-            "approvalsReviewer": "user",
+            **_approval_params(payload),
             "sandbox": payload.get("sandbox") or "workspace-write",
             "ephemeral": bool(payload.get("ephemeral", False)),
             "experimentalRawEvents": False,
@@ -1404,6 +1402,20 @@ def _command_preview(params: JsonDict) -> str | None:
     if isinstance(item.get("command"), str):
         return item.get("command")
     return None
+
+
+def _approval_params(payload: JsonDict) -> JsonDict:
+    policy = payload.get("approval_policy")
+    if policy == "auto-review":
+        return {"approvalPolicy": "on-request", "approvalsReviewer": "auto_review"}
+    if policy == "always-allow":
+        policy = "never"
+    if policy == "on-failure":
+        policy = "on-request"
+    if policy not in {None, "untrusted", "on-request", "never"}:
+        raise ConnectorError("unsupported Codex approval policy")
+    # Without an explicit override, resumed threads retain local permissions.
+    return {"approvalPolicy": policy, "approvalsReviewer": "user"} if policy else {}
 
 
 def _sandbox_policy(cwd: str, sandbox: str = "workspace-write") -> JsonDict:
