@@ -1103,3 +1103,25 @@ def test_codex_unsupported_input_preserves_questions_and_rejects_request():
     assert event["payload"]["status"] == "unsupported"
     assert event["payload"]["questions"] == params["questions"]
     assert server.responses[0][1]["error"]["code"] == "unsupported_request"
+
+
+def test_claude_execution_options_reject_unsupported_values():
+    class FakeSdk:
+        @staticmethod
+        def ClaudeAgentOptions(**kwargs):
+            return kwargs
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    provider._sdk = FakeSdk()
+    for payload in [{"sandbox": "read-only"}, {"approval_policy": "untrusted"}]:
+        try:
+            provider._build_options({"payload": payload}, cwd=Path("."), can_use_tool=None)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsupported execution options accepted")
+    callback = lambda *args: None
+    for policy, expected in [(None, "default"), ("on-request", "default"), ("never", "dontAsk")]:
+        options = provider._build_options({"payload": {"approval_policy": policy}},
+                                         cwd=Path("."), can_use_tool=callback)
+        assert options["permission_mode"] == expected
+        assert options["can_use_tool"] is (None if policy == "never" else callback)

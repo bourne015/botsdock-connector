@@ -1103,11 +1103,16 @@ class ClaudeAgentSdkProvider:
                 message=str(err),
             )
             return
-        options = self._build_options(
-            request,
-            cwd=cwd,
-            can_use_tool=self._build_permission_handler(request, queue),
-        )
+        try:
+            options = self._build_options(
+                request,
+                cwd=cwd,
+                can_use_tool=self._build_permission_handler(request, queue),
+            )
+        except ValueError as err:
+            self._cancel_events.pop(turn_id, None)
+            yield self._turn_failed(request, code="invalid_request", message=str(err))
+            return
 
         yield self._envelope(
             "turn.started",
@@ -1262,6 +1267,10 @@ class ClaudeAgentSdkProvider:
         reasoning_effort = _string(_payload_value(request, "reasoning_effort"))
         provider_session_id = _string(_payload_value(request, "provider_session_id"))
         approval_policy = _string(_payload_value(request, "approval_policy"))
+        if _string(_payload_value(request, "sandbox")):
+            raise ValueError("Claude Code does not support Codex sandbox options")
+        if approval_policy not in {None, "on-request", "never"}:
+            raise ValueError("Claude Code supports only on-request or never approval policy")
         permission_mode = "dontAsk" if approval_policy == "never" else "default"
         kwargs: JsonDict = {
             "cwd": str(cwd),
