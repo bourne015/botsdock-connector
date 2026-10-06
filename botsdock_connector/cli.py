@@ -806,7 +806,10 @@ class ClaudeCodeConnector:
             )
             return ok_response(request_id, {"cancelled": True})
         if msg_type == "app_server.approval_respond":
-            envelope = await self.provider.resolve_approval(payload)
+            try:
+                envelope = await self.provider.resolve_approval(payload)
+            except ValueError as exc:
+                return error_response(request_id, "approval_request_not_found", str(exc))
             await self.outbound.put(
                 envelope_to_backend_message(envelope, payload, request_id=request_id)
             )

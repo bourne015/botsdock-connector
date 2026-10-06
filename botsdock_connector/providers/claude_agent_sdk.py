@@ -1199,10 +1199,10 @@ class ClaudeAgentSdkProvider:
             or _string(_payload_value(request, "request_id"))
             or _string(_payload_value(request, "provider_request_id"))
         )
-        if app_server_request_id:
-            future = self._pending_approvals.get(app_server_request_id)
-            if future is not None and not future.done():
-                future.set_result(dict(request.get("payload") or request))
+        future = self._pending_approvals.get(app_server_request_id or "")
+        if future is None or future.done():
+            raise ValueError("approval_request_not_found")
+        future.set_result(dict(request.get("payload") or request))
         return self._envelope(
             "approval.resolved",
             request,

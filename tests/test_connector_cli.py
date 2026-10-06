@@ -1052,3 +1052,36 @@ def test_codex_app_server_initializes_experimental_api_capability() -> None:
     assert method == "initialize"
     assert params["capabilities"]["experimentalApi"] is True
     assert app_server.notifications == [("initialized", None)]
+
+
+def test_claude_approval_only_acknowledges_live_waiter() -> None:
+    async def run():
+        provider = ClaudeAgentSdkProvider(cwd=".")
+        outbound = asyncio.Queue()
+        connector = ClaudeCodeConnector(provider=provider, outbound=outbound)
+        message = {
+            "type": "app_server.approval_respond",
+            "request_id": "resolve_1",
+            "payload": {"app_server_request_id": "permission_1", "decision": "accept"},
+        }
+        missing = await connector.handle_backend_message(message)
+        assert missing["error"]["code"] == "approval_request_not_found"
+        assert outbound.empty()
+
+        waiter = asyncio.get_running_loop().create_future()
+        provider._pending_approvals["permission_1"] = waiter
+        accepted = await connector.handle_backend_message(message)
+        assert accepted["payload"]["resolved"] is True
+        assert waiter.result()["decision"] == "accept"
+        assert (await outbound.get())["event_type"] == "approval.resolved"
+
+        duplicate = await connector.handle_backend_message(message)
+        assert duplicate["error"]["code"] == "approval_request_not_found"
+        assert outbound.empty()
+        waiter = asyncio.get_running_loop().create_future()
+        waiter.cancel()
+        provider._pending_approvals["permission_1"] = waiter
+        cancelled = await connector.handle_backend_message(message)
+        assert cancelled["error"]["code"] == "approval_request_not_found"
+        assert outbound.empty()
+    asyncio.run(run())
