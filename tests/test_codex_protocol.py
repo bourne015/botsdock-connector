@@ -22,3 +22,10 @@ def test_explicit_sandbox_is_preserved(sandbox, kind):
 def test_missing_sandbox_inherits_runtime_thread_policy():
     connector = CodexConnector(app_server=FakeServer(), cwd="/tmp")
     assert "sandboxPolicy" not in connector._turn_start_params("t", "hello", {})
+
+@pytest.mark.parametrize("method,event", [("item/plan/delta", "plan.delta"), ("item/reasoning/summaryTextDelta", "reasoning.delta"), ("item/reasoning/textDelta", "reasoning.delta")])
+def test_current_item_deltas(method, event):
+    kind, payload = normalize_appserver_notification(method, {"itemId": "i", "delta": "hello"})
+    assert kind == event
+    assert payload["item_id"] == "i"
+    assert payload["text"] == "hello"

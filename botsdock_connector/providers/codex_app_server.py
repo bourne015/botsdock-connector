@@ -999,11 +999,12 @@ def normalize_appserver_notification(method: str, params: JsonDict) -> tuple[str
             "plan": plan,
             **({"text": text} if isinstance(text, str) and text else {}),
         }
-    if method in {"turn/plan/delta", "plan/delta"}:
+    if method in {"item/plan/delta", "turn/plan/delta", "plan/delta"}:
         return "plan.delta", {
+            "item_id": params.get("itemId"),
             "text": params.get("delta") or params.get("text") or "",
         }
-    if method in {"turn/reasoning/delta", "item/reasoning/delta", "reasoning/delta"}:
+    if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "turn/reasoning/delta", "item/reasoning/delta", "reasoning/delta"}:
         return "reasoning.delta", {
             "item_id": params.get("itemId") or params.get("item_id"),
             "text": params.get("delta") or params.get("text") or "",
