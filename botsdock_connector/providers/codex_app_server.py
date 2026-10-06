@@ -661,6 +661,7 @@ class CodexConnector:
                     "request_method": method,
                     "prompt": params.get("prompt") or params.get("message") or params.get("label"),
                     "status": "unsupported",
+                    "questions": params.get("questions") or [],
                 },
                 "raw_payload": message,
             }

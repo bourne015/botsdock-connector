@@ -1085,3 +1085,21 @@ def test_claude_approval_only_acknowledges_live_waiter() -> None:
         assert cancelled["error"]["code"] == "approval_request_not_found"
         assert outbound.empty()
     asyncio.run(run())
+
+
+def test_codex_unsupported_input_preserves_questions_and_rejects_request():
+    class FakeAppServer:
+        def __init__(self):
+            self.responses = []
+        def send_response(self, request_id, **kwargs):
+            self.responses.append((request_id, kwargs))
+    server = FakeAppServer()
+    connector = CodexConnector(app_server=server, cwd=".")
+    connector.reverse_thread_map["app_thread_1"] = "thread_1"
+    params = {"threadId": "app_thread_1", "questions": [{"id": "q1", "question": "Continue?"}]}
+    event = connector._normalize_server_request(
+        {"id": 42}, "item/tool/requestUserInput", params,
+    )
+    assert event["payload"]["status"] == "unsupported"
+    assert event["payload"]["questions"] == params["questions"]
+    assert server.responses[0][1]["error"]["code"] == "unsupported_request"
