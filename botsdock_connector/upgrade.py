@@ -223,9 +223,11 @@ def run_upgrade(args: argparse.Namespace) -> int:
                     f"botsdock connector version {new_version} installed.",
                     file=sys.stderr,
                 )
-        else:
-            print(
-                "botsdock connector upgrade finished. Restart botsdock-connector to use the new version.",
-                file=sys.stderr,
-            )
+        print(
+            "Restart the connector to use the new version. For background mode, "
+            "run 'botsdock-connector stop', then repeat your original start command "
+            "(including any custom server, machine or runtime arguments). "
+            "For foreground mode, stop it with Ctrl-C and repeat the original command.",
+            file=sys.stderr,
+        )
     return result.returncode

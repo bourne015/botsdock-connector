@@ -55,7 +55,10 @@ botsdock-connector upgrade --source pypi
 
 For private mirrors, set `BOTSDOCK_CONNECTOR_UPGRADE_SPEC` or pass
 `--package-spec`. The running connector process is not hot-swapped — stop and
-restart `botsdock-connector` after the upgrade.
+restart `botsdock-connector` after the upgrade. In background mode, run
+`botsdock-connector stop`, then repeat your original `start` command, preserving
+custom server, machine, workspace and runtime options. In foreground mode use
+Ctrl-C, then repeat the original command. Upgrading never interrupts active turns.
 
 ## Quick start
 

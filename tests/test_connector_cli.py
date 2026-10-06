@@ -378,6 +378,7 @@ def test_upgrade_log_prefers_pip_success_version_over_stale_metadata(
     assert "Successfully installed botsdock-connector-0.1.14" in captured.out
     assert "botsdock connector upgraded: 0.1.13 -> 0.1.14" in captured.err
     assert "0.1.13 -> 0.1.11" not in captured.err
+    assert "Restart the connector" in captured.err
 
 
 def test_upgrade_log_ignores_stale_metadata_downgrade(
