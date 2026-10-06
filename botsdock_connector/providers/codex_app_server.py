@@ -555,11 +555,28 @@ class CodexConnector:
             rate_limits_result = self.app_server.request("account/rateLimits/read")
         except Exception as exc:
             errors["rate_limits"] = str(exc)
-        if not account_result and not rate_limits_result:
+        models: list[JsonDict] = []
+        try:
+            cursor = None
+            while True:
+                params = {"limit": 100, "includeHidden": False}
+                if cursor:
+                    params["cursor"] = cursor
+                catalog = self.app_server.request("model/list", params)
+                models.extend(item for item in catalog.get("data", []) if isinstance(item, dict) and not item.get("hidden"))
+                next_cursor = catalog.get("nextCursor")
+                if not next_cursor or next_cursor == cursor:
+                    break
+                cursor = next_cursor
+        except Exception as exc:
+            models = []
+            errors["models"] = str(exc)
+        if not account_result and not rate_limits_result and not models:
             raise ConnectorError(errors.get("account") or errors.get("rate_limits") or "failed to read Codex account")
         rate_limits, rate_limits_by_limit_id = _safe_rate_limits(rate_limits_result)
         return {
             "captured_at": int(time.time()),
+            "models": models,
             "account": _safe_account(account_result.get("account")),
             "requires_openai_auth": bool(account_result.get("requiresOpenaiAuth")),
             "rate_limits": rate_limits,

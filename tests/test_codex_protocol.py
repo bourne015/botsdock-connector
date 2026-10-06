@@ -48,3 +48,15 @@ def test_resume_without_policy_does_not_override_local_reviewer():
     params = connector._turn_start_params("t", "hello", {})
     assert "approvalPolicy" not in params
     assert "approvalsReviewer" not in params
+
+def test_account_snapshot_includes_paginated_runtime_models():
+    class Server:
+        def request(self, method, params=None):
+            if method == "model/list":
+                if params.get("cursor") == "page-2":
+                    return {"data": [{"id": "new-2", "model": "new-2", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]}
+                return {"data": [{"id": "new-1", "model": "new-1", "isDefault": True}, {"id": "hidden", "hidden": True}], "nextCursor": "page-2"}
+            return {"requiresOpenaiAuth": False}
+    result = CodexConnector(app_server=Server(), cwd="/tmp")._handle_account_snapshot({})
+    assert [model["id"] for model in result["models"]] == ["new-1", "new-2"]
+    assert result["models"][1]["supportedReasoningEfforts"][0]["reasoningEffort"] == "high"
