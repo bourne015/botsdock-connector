@@ -23,6 +23,13 @@ rm -f "$installer"
 export PATH="$HOME/.botsdock/connector/current/bin:$PATH"
 ```
 
+The PATH above works regardless of the Python distribution's user-site directory.
+Add the same `export PATH="$HOME/.botsdock/connector/current/bin:$PATH"` line to
+`~/.zshrc` (zsh) or `~/.bashrc` (bash) so new terminals can find the command.
+If migrating from a `pip --user` install, put this directory before the old command
+and confirm with `command -v botsdock-connector`. Stop the old daemon before starting
+the managed installation; machine registration is retained.
+
 The installer does not modify the system Python or your saved machine credentials.
 For development or Windows, use a manually created virtual environment and install
 with `python -m pip install git+https://github.com/bourne015/botsdock-connector.git`.
