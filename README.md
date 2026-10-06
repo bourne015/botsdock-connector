@@ -207,3 +207,25 @@ requests by the provider on each resource:
   ]
 }
 ```
+
+## Protocol and runtime compatibility
+
+The connector wire protocol is `0.1`. Unknown versions returned by the server are
+rejected; legacy 0.1 servers that omit the response version remain supported.
+
+Before making Codex available, the installed binary exports its JSON Schema.
+Core thread, turn, and history methods must exist. Stable API is preferred;
+experimental API is enabled only when the installed version needs it for a core
+method. Repair or upgrade Codex if schema export fails or methods are missing.
+This check does not replace an end-to-end smoke after a CLI upgrade.
+
+Claude uses local user/project/local permission rules. Locally allowed tools can
+skip web approval. Codex sandbox values are rejected for Claude; supported approval
+policies are `on-request` and `never` (`dontAsk`, which denies required prompts).
+Stale or completed approvals are rejected instead of acknowledged as resolved.
+Codex user-input and MCP elicitation requests are currently rejected explicitly;
+unsupported records preserve their questions and do not block the web console.
+
+Run local tests with `python -m pytest`. These tests use simulated runtime events;
+run `botsdock_connector/claude_agent_sdk_smoke.py` with local authentication for
+real SDK verification. Never commit credentials or sensitive smoke output.
