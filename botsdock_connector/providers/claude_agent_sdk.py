@@ -661,6 +661,7 @@ class ClaudeAgentSdkProvider:
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._pending_approvals: dict[str, asyncio.Future[JsonDict]] = {}
         self._auth_required_turns: set[str] = set()
+        self._tool_uses: dict[tuple[str | None, str | None], JsonDict] = {}
 
     async def start(self) -> None:
         # Keep the import lazy so Codex-only connections do not initialize the
@@ -1226,6 +1227,12 @@ class ClaudeAgentSdkProvider:
         raw = _jsonable(message)
         if message_type == "AssistantMessage":
             return self._map_assistant_message(request, message, raw)
+        if message_type == "UserMessage":
+            envelopes = []
+            for block in getattr(message, "content", []) or []:
+                if type(block).__name__ == "ToolResultBlock":
+                    envelopes.extend(self._map_tool_result(request, block, raw))
+            return envelopes
         if message_type == "ResultMessage":
             return [self._map_result_message(request, message, raw)]
         if message_type == "StreamEvent":
@@ -1444,6 +1451,9 @@ class ClaudeAgentSdkProvider:
         item_id = _string(getattr(block, "id", None)) or provider_event_id
         input_data = getattr(block, "input", None)
         input_payload = input_data if isinstance(input_data, dict) else {}
+        self._tool_uses[(_string(_payload_value(request, "turn_id")), item_id)] = {
+            "tool_name": tool_name, "input": input_payload,
+        }
         if tool_name == _BASH_TOOL:
             command = _string(input_payload.get("command")) or tool_name
             return [
@@ -1511,6 +1521,23 @@ class ClaudeAgentSdkProvider:
         content = getattr(block, "content", None)
         text = content if isinstance(content, str) else json.dumps(_jsonable(content))
         is_error = bool(getattr(block, "is_error", False))
+        tool = self._tool_uses.pop((_string(_payload_value(request, "turn_id")), tool_use_id), {})
+        tool_name = tool.get("tool_name")
+        if tool_name != _BASH_TOOL:
+            input_payload = tool.get("input") or {}
+            payload = {
+                "item_id": tool_use_id, "provider": self.name, "tool_name": tool_name,
+                "status": "failed" if is_error else "completed", "text": text or "",
+            }
+            if tool_name in _EDIT_TOOLS:
+                payload["path"] = input_payload.get("file_path") or input_payload.get("path") or input_payload.get("notebook_path")
+                payload["change_type"] = tool_name.lower()
+            else:
+                payload["kind"] = "tool_result"
+            return [self._envelope(
+                "file.changed" if tool_name in _EDIT_TOOLS else "provider.debug",
+                request, payload, raw_event=raw, provider_event_id=tool_use_id,
+            )]
         return [
             self._envelope(
                 "command.output",
