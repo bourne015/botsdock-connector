@@ -17,10 +17,11 @@ On macOS and Linux, install into a dedicated virtual environment (Python 3.10+
 and Git are required). Download and run the standalone installer:
 
 ```bash
-installer=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/bourne015/botsdock-connector/main/botsdock_connector/install.py -o "$installer" && python3 "$installer"
-rm -f "$installer"
-export PATH="$HOME/.botsdock/connector/current/bin:$PATH"
+(
+  installer=$(mktemp) || exit 1
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/bourne015/botsdock-connector/v0.1.15/botsdock_connector/install.py -o "$installer" && python3 "$installer"
+) && export PATH="$HOME/.botsdock/connector/current/bin:$PATH"
 ```
 
 The PATH above works regardless of the Python distribution's user-site directory.
@@ -40,11 +41,13 @@ with `python -m pip install git+https://github.com/bourne015/botsdock-connector.
 botsdock-connector upgrade
 ```
 
-GitHub upgrades force a reinstall so new commits are picked up even when the
-version number hasn't changed. Pin a specific release tag:
+Default GitHub installs and upgrades select the highest stable semantic-version
+tag, resolve it to an immutable commit, and record the source in the installed
+environment's `botsdock-install.json`. Explicit Git sources force a reinstall so
+same-version commits are picked up. Pin a specific release tag:
 
 ```bash
-botsdock-connector upgrade --version v0.1.5
+botsdock-connector upgrade --version v0.1.15
 ```
 
 After publishing to PyPI, switch the source:
@@ -59,6 +62,20 @@ restart `botsdock-connector` after the upgrade. In background mode, run
 `botsdock-connector stop`, then repeat your original `start` command, preserving
 custom server, machine, workspace and runtime options. In foreground mode use
 Ctrl-C, then repeat the original command. Upgrading never interrupts active turns.
+
+Each upgrade builds a fresh environment, runs `pip check` and the CLI help command,
+and only then atomically switches the `current` symlink. Failure leaves the old
+entry untouched. The previous environment is retained. To roll back, run:
+
+```bash
+python3 -m botsdock_connector.install --rollback
+```
+
+Run this with the managed Connector environment active on PATH. After rollback,
+restart the Connector using your original arguments. Existing foreground/background
+processes keep running their old environment until stopped. Use the same standalone
+installer to recover if the command is unavailable. Windows users should keep their
+old manual venv until a replacement passes `pip check` and CLI startup validation.
 
 ## Quick start
 

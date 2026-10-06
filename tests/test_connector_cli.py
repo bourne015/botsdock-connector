@@ -42,8 +42,6 @@ from botsdock_connector.token_store import (
 )
 from botsdock_connector import upgrade as upgrade_module
 from botsdock_connector.upgrade import (
-    _parse_created_wheel_version,
-    _parse_successfully_installed_version,
     build_upgrade_pip_args,
     run_upgrade,
 )
@@ -327,89 +325,23 @@ def test_upgrade_subcommand_supports_github_ref_and_pypi_version() -> None:
     assert build_upgrade_pip_args(pypi_args)[-1] == "botsdock-connector==0.1.1"
 
 
-def test_parse_successfully_installed_connector_version() -> None:
-    assert (
-        _parse_successfully_installed_version(
-            "Successfully installed foo-1.0 botsdock-connector-0.1.14"
-        )
-        == "0.1.14"
-    )
-    assert (
-        _parse_successfully_installed_version(
-            "Successfully installed botsdock_connector-0.1.14"
-        )
-        == "0.1.14"
-    )
-    assert (
-        _parse_created_wheel_version(
-            "Created wheel for botsdock-connector: "
-            "filename=botsdock_connector-0.1.14-py3-none-any.whl"
-        )
-        == "0.1.14"
-    )
+def test_upgrade_installs_isolated_environment_and_explains_restart(monkeypatch, capsys):
+    from botsdock_connector import install as installer
+    calls = []
+    monkeypatch.setattr(installer, 'install', lambda spec, options: calls.append((spec, options)) or '/managed/bin/botsdock-connector')
+    assert run_upgrade(build_parser().parse_args(['upgrade'])) == 0
+    assert calls[0][0] == upgrade_module.GITHUB_UPGRADE_SPEC
+    assert '--force-reinstall' in calls[0][1]
+    assert 'Restart the connector' in capsys.readouterr().err
 
 
-def test_upgrade_log_prefers_pip_success_version_over_stale_metadata(
-    monkeypatch,
-    capsys,
-) -> None:
-    args = build_parser().parse_args(["upgrade", "--source", "pypi"])
-
-    monkeypatch.setattr(upgrade_module, "_check_pip_version", lambda: True)
-    monkeypatch.setattr(upgrade_module, "_get_installed_version", lambda: "0.1.13")
-    monkeypatch.setattr(
-        upgrade_module,
-        "_get_package_version_via_subprocess",
-        lambda: "0.1.11",
-    )
-
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout="Successfully installed botsdock-connector-0.1.14\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(upgrade_module.subprocess, "run", fake_run)
-
-    assert run_upgrade(args) == 0
-    captured = capsys.readouterr()
-    assert "Successfully installed botsdock-connector-0.1.14" in captured.out
-    assert "botsdock connector upgraded: 0.1.13 -> 0.1.14" in captured.err
-    assert "0.1.13 -> 0.1.11" not in captured.err
-    assert "Restart the connector" in captured.err
-
-
-def test_upgrade_log_ignores_stale_metadata_downgrade(
-    monkeypatch,
-    capsys,
-) -> None:
-    args = build_parser().parse_args(["upgrade", "--source", "pypi"])
-
-    monkeypatch.setattr(upgrade_module, "_check_pip_version", lambda: True)
-    monkeypatch.setattr(upgrade_module, "_get_installed_version", lambda: "0.1.14")
-    monkeypatch.setattr(
-        upgrade_module,
-        "_get_package_version_via_subprocess",
-        lambda: "0.1.11",
-    )
-
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout="Successfully installed botsdock-connector\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(upgrade_module.subprocess, "run", fake_run)
-
-    assert run_upgrade(args) == 0
-    captured = capsys.readouterr()
-    assert "Successfully installed botsdock-connector" in captured.out
-    assert "ignoring stale installed-version metadata (0.1.11)" in captured.err
-    assert "0.1.14 -> 0.1.11" not in captured.err
+def test_upgrade_preserves_previous_installation_on_failure(monkeypatch, capsys):
+    from botsdock_connector import install as installer
+    def fail(*args):
+        raise RuntimeError('validation failed')
+    monkeypatch.setattr(installer, 'install', fail)
+    assert run_upgrade(build_parser().parse_args(['upgrade'])) == 1
+    assert 'previous installation remains active' in capsys.readouterr().err
 
 
 def test_saved_connectors_can_be_loaded_together() -> None:
