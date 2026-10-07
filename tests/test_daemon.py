@@ -135,3 +135,19 @@ def test_install_signal_handlers():
     assert callable(handler)
     assert handler is not signal.SIG_DFL
     assert handler is not signal.SIG_IGN
+
+
+def test_stop_refuses_reused_pid(monkeypatch, tmp_path):
+    from botsdock_connector import daemon
+    monkeypatch.setattr(daemon, '_botsdock_dir', lambda: tmp_path)
+    monkeypatch.setattr(daemon, '_process_identity', lambda pid: 'original')
+    daemon._write_pid_data(123, 'server', '/tmp', [])
+    monkeypatch.setattr(daemon, '_process_identity', lambda pid: 'replacement')
+    with mock.patch.object(daemon.os, 'kill') as kill:
+        assert daemon.daemon_stop() == 1
+        kill.assert_not_called()
+
+
+def test_current_python_process_is_not_a_connector():
+    from botsdock_connector.daemon import _process_identity
+    assert _process_identity(os.getpid()) is None

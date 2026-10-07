@@ -7,6 +7,9 @@ self-spawn, without any third-party dependencies.
 from __future__ import annotations
 
 import json
+import hashlib
+import shlex
+from contextlib import contextmanager
 import os
 import signal
 import subprocess
@@ -62,6 +65,7 @@ def _write_pid_data(pid: int, server: str, cwd: str, machine_ids: list[str]) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "pid": pid,
+        "process_identity": _process_identity(pid),
         "started_at": int(time.time()),
         "server": server,
         "cwd": cwd,
@@ -82,6 +86,47 @@ def _is_pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _process_identity(pid: int) -> str | None:
+    if pid <= 0:
+        return None
+    try:
+        result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'command='],
+                                check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    command = result.stdout.strip()
+    fields = command.split(maxsplit=5)
+    if len(fields) != 6:
+        return None
+    arguments = shlex.split(fields[5])
+    is_connector = any(arguments[i:i + 2] == ['-m', 'botsdock_connector']
+                       for i in range(len(arguments) - 1))
+    is_connector = is_connector or any(Path(arg).name == 'botsdock-connector'
+                                       for arg in arguments[:2])
+    if not is_connector:
+        return None
+    return hashlib.sha256(command.encode()).hexdigest()
+
+
+def _matches_process(data: dict[str, Any]) -> bool:
+    pid = data.get('pid')
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    identity = _process_identity(pid)
+    # Legacy files lack a fingerprint: still require a Connector command.
+    return identity is not None and data.get('process_identity', identity) == identity
+
+
+@contextmanager
+def _lifecycle_lock():
+    import fcntl
+    directory = _botsdock_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / 'connector-lifecycle.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +175,11 @@ def install_signal_handlers() -> None:
 
 
 def daemon_start(args: Any) -> int:
+    with _lifecycle_lock():
+        return _daemon_start(args)
+
+
+def _daemon_start(args: Any) -> int:
     """Start the connector as a background daemon process.
 
     Returns exit code: 0 on success, 1 on failure.
@@ -137,7 +187,7 @@ def daemon_start(args: Any) -> int:
     existing = _read_pid_data()
     if existing is not None:
         pid = existing.get("pid")
-        if isinstance(pid, int) and _is_pid_alive(pid):
+        if _matches_process(existing):
             print(
                 f"botsdock-connector is already running (PID={pid}). "
                 f"Use 'botsdock-connector stop' first.",
@@ -196,6 +246,11 @@ def daemon_start(args: Any) -> int:
 
 
 def daemon_stop() -> int:
+    with _lifecycle_lock():
+        return _daemon_stop()
+
+
+def _daemon_stop() -> int:
     """Stop a running daemon process.
 
     Returns exit code: 0 on success, 1 if not running.
@@ -206,7 +261,7 @@ def daemon_stop() -> int:
         return 1
 
     pid = data.get("pid")
-    if not isinstance(pid, int) or not _is_pid_alive(pid):
+    if not _matches_process(data):
         print(
             "botsdock-connector is not running "
             "(PID file present but process not alive).",
@@ -225,13 +280,16 @@ def daemon_stop() -> int:
     # Wait for the process to exit.
     waited = 0.0
     while waited < STOP_TIMEOUT_SECONDS:
-        if not _is_pid_alive(pid):
+        if not _matches_process(data):
             _remove_pid_data()
             print(f"botsdock-connector stopped (PID={pid}).", file=sys.stderr)
             return 0
         time.sleep(STOP_POLL_INTERVAL)
         waited += STOP_POLL_INTERVAL
 
+    if not _matches_process(data):
+        _remove_pid_data()
+        return 0
     # Graceful shutdown timed out; force kill.
     print(
         f"botsdock-connector did not stop within {STOP_TIMEOUT_SECONDS}s, "
@@ -270,7 +328,7 @@ def daemon_status() -> int:
         print("Not running (invalid PID file).", file=sys.stderr)
         return 1
 
-    if not _is_pid_alive(pid):
+    if not _matches_process(data):
         print(
             "Not running (PID file present but process not alive).",
             file=sys.stderr,
