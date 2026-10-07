@@ -224,6 +224,7 @@ def _daemon_start(args: Any) -> int:
         stdin=subprocess.DEVNULL,
         stdout=log_fd,
         stderr=subprocess.STDOUT,
+        env={**os.environ, "BOTSDOCK_CONNECTOR_DAEMON": "1"},
     )
     log_fd.close()
 

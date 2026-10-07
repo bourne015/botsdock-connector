@@ -76,6 +76,22 @@ def _rollback() -> Path:
     return root / 'current' / 'bin' / 'botsdock-connector'
 
 
+def cleanup_environments(root: Path) -> None:
+    # Keep any environment still used by a foreground/background Connector.
+    try:
+        processes = subprocess.run(['ps', '-axo', 'command='], check=True,
+                                   capture_output=True, text=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return
+    keep = {(root / name).resolve() for name in ('current', 'previous')}
+    for environment in root.glob('env-*'):
+        if (environment.is_symlink() or environment in keep or
+                str(environment) in processes or
+                not (environment / 'botsdock-install.json').is_file()):
+            continue
+        shutil.rmtree(environment, ignore_errors=True)
+
+
 def install(package_spec: str, pip_args: list[str] | None = None) -> Path:
     with installation_lock():
         return _install(package_spec, pip_args)
@@ -110,10 +126,11 @@ def _install(package_spec: str, pip_args: list[str] | None = None) -> Path:
         temporary.unlink(missing_ok=True)
         temporary.symlink_to(environment)
         temporary.replace(current)
-        return current / 'bin' / 'botsdock-connector'
     except BaseException:
         shutil.rmtree(environment, ignore_errors=True)
         raise
+    cleanup_environments(root)
+    return current / 'bin' / 'botsdock-connector'
 
 
 def main() -> int:

@@ -25,6 +25,8 @@ def test_switches_only_after_validation_and_preserves_previous(monkeypatch, tmp_
     root, old = prepare(monkeypatch, tmp_path)
     commands = []
     def run(command, **kwargs):
+        if command[0] == 'ps':
+            return subprocess.CompletedProcess(command, 0, stdout='')
         assert (root / 'current').resolve() == old
         commands.append(command)
     monkeypatch.setattr(installer.subprocess, 'run', run)
@@ -90,3 +92,18 @@ def test_concurrent_installation_is_rejected(monkeypatch, tmp_path):
         with pytest.raises(RuntimeError, match='Another installation'):
             with installer.installation_lock():
                 pass
+
+
+def test_cleanup_keeps_previous_and_running_environments(monkeypatch, tmp_path):
+    for name in ['env-current', 'env-previous', 'env-running', 'env-unused']:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / 'botsdock-install.json').touch()
+    (tmp_path / 'current').symlink_to(tmp_path / 'env-current')
+    (tmp_path / 'previous').symlink_to(tmp_path / 'env-previous')
+    monkeypatch.setattr(installer.subprocess, 'run', lambda *a, **kw:
+        subprocess.CompletedProcess(a, 0, stdout=str(tmp_path / 'env-running' / 'bin' / 'python')))
+    installer.cleanup_environments(tmp_path)
+    assert not (tmp_path / 'env-unused').exists()
+    assert (tmp_path / 'env-running').exists()
+    assert (tmp_path / 'env-previous').exists()
