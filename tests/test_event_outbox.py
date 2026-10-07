@@ -26,3 +26,35 @@ def test_transients_are_not_persisted_and_machines_are_isolated(monkeypatch, tmp
     assert other.pending() == []
     first.close()
     other.close()
+
+
+async def test_failed_socket_send_keeps_the_event_for_reconnect(monkeypatch, tmp_path):
+    import pytest
+    from botsdock_connector.session import outbound_writer
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    queue = EventOutbox('server', 'machine')
+    queue.put_nowait({'type': 'connector.event', 'event_type': 'assistant.message'})
+    class BrokenSocket:
+        async def send(self, data):
+            raise ConnectionError('disconnected')
+    with pytest.raises(ConnectionError):
+        await outbound_writer(BrokenSocket(), queue)
+    assert len(queue.pending()) == 1
+    queue.close()
+
+
+async def test_delivery_ack_clears_original_id_when_server_merges_events(monkeypatch, tmp_path):
+    from botsdock_connector.session import message_loop
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    queue = EventOutbox('server', 'machine')
+    queue.put_nowait({'type': 'connector.event', 'event_id': 'delivery'})
+    class Socket:
+        async def __aiter__(self):
+            import json
+            yield json.dumps({'type': 'connector.event_ack', 'event_id': 'delivery',
+                              'event': {'id': 'merged-event'}})
+    async def handler(message):
+        return None
+    await message_loop(Socket(), handler=handler, outbound=queue)
+    assert queue.pending() == []
+    queue.close()

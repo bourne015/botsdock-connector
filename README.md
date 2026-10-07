@@ -258,3 +258,16 @@ unsupported records preserve their questions and do not block the web console.
 Run local tests with `python -m pytest`. These tests use simulated runtime events;
 run `botsdock_connector/claude_agent_sdk_smoke.py` with local authentication for
 real SDK verification. Never commit credentials or sensitive smoke output.
+
+## Delivery and daemon maintenance
+
+Durable events are stored in a machine/server-scoped SQLite outbox under
+`~/.botsdock/outbox` until acknowledged. Failed sends, reconnects and process
+restarts replay their stable event IDs; the Console API deduplicates them before
+acknowledging. Deploy the matching API acknowledgement changes with this release.
+Transient deltas are not persisted in this outbox.
+
+Daemon lifecycle operations are serialized and verify process identity before
+signalling a PID. Background logs retain a current 5 MiB file and two rotated
+files. Managed upgrades keep current, previous and still-running environments;
+unused older environments are removed after a successful upgrade.
