@@ -44,6 +44,7 @@ class BufferedBackendSender:
         self._buffers: dict[tuple[Any, ...], JsonDict] = {}
         self._flush_scheduled = False
         self._closed = False
+        self._pending_sends: set[Any] = set()
 
     def send(self, message: JsonDict) -> None:
         if self._closed:
@@ -123,7 +124,27 @@ class BufferedBackendSender:
 
     def _put(self, message: JsonDict) -> None:
         if not self._closed:
-            asyncio.run_coroutine_threadsafe(self.outbound.put(message), self.loop)
+            future = asyncio.run_coroutine_threadsafe(self.outbound.put(message), self.loop)
+            with self._lock:
+                self._pending_sends.add(future)
+            def finished(done):
+                with self._lock:
+                    self._pending_sends.discard(done)
+                if not done.cancelled() and done.exception() is not None:
+                    logger.error('outbound event queue failed: %s', done.exception())
+            future.add_done_callback(finished)
+
+    async def drain(self) -> None:
+        with self._lock:
+            pending = list(self._pending_sends)
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(asyncio.wrap_future(item) for item in pending)),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                logger.warning('discarding unsent transient output during shutdown')
 
     @staticmethod
     def _materialize(entry: JsonDict) -> JsonDict:

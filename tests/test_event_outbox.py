@@ -58,3 +58,14 @@ async def test_delivery_ack_clears_original_id_when_server_merges_events(monkeyp
     await message_loop(Socket(), handler=handler, outbound=queue)
     assert queue.pending() == []
     queue.close()
+
+
+async def test_full_memory_queue_does_not_drop_durable_events(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    queue = EventOutbox('server', 'machine')
+    for _ in range(queue.maxsize):
+        queue.put_nowait({'type': 'connector.transient'})
+    await queue.put({'type': 'connector.event', 'event_type': 'turn.completed'})
+    assert len(queue.pending()) == 1
+    assert queue.qsize() == queue.maxsize
+    queue.close()

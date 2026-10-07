@@ -1251,11 +1251,12 @@ async def run_agent_provider_session(
             await task
     finally:
         cancelled.set()
-        buffered_sender.close()
-        writer_task.cancel()
         heartbeat_task.cancel()
         receiver_task.cancel()
         await mux.stop()
+        buffered_sender.close()
+        await buffered_sender.drain()
+        writer_task.cancel()
         await asyncio.gather(writer_task, heartbeat_task, receiver_task, return_exceptions=True)
         outbound.close()
 

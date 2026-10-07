@@ -22,9 +22,13 @@ class EventOutbox(asyncio.Queue):
         self.database.execute('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, message TEXT NOT NULL)')
         self.database.commit()
 
+    async def put(self, message):
+        if message.get('type') == 'connector.event':
+            self.put_nowait(message)
+        else:
+            await super().put(message)
+
     def put_nowait(self, message):
-        if self.full():
-            raise asyncio.QueueFull
         if message.get('type') == 'connector.event':
             message = dict(message)
             if not message.get('event_id'):
@@ -32,6 +36,9 @@ class EventOutbox(asyncio.Queue):
             with self.database:
                 self.database.execute('INSERT OR IGNORE INTO events VALUES (?, ?)',
                                       (message['event_id'], json.dumps(message)))
+        if self.full() and message.get('type') == 'connector.event':
+            # The writer's retry loop will send it from disk.
+            return
         super().put_nowait(message)
 
     def pending(self):
