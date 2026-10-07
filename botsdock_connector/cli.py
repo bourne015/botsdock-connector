@@ -1235,21 +1235,28 @@ async def run_agent_provider_session(
             cancelled=cancelled,
         )
     )
-    try:
-        await message_loop(
+    receiver_task = asyncio.create_task(message_loop(
             websocket,
             handler=mux.handle_backend_message,
             outbound=outbound,
             tag_provider_fn=_tag_provider_message,
             provider_tag=None,
+    ))
+    try:
+        done, _ = await asyncio.wait(
+            [receiver_task, writer_task, heartbeat_task],
+            return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in done:
+            await task
     finally:
         cancelled.set()
         buffered_sender.close()
         writer_task.cancel()
         heartbeat_task.cancel()
+        receiver_task.cancel()
         await mux.stop()
-        await asyncio.gather(writer_task, heartbeat_task, return_exceptions=True)
+        await asyncio.gather(writer_task, heartbeat_task, receiver_task, return_exceptions=True)
         outbound.close()
 
 
