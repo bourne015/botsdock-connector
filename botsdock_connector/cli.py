@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .event_outbox import EventOutbox
 from .daemon import (
     daemon_restart,
     daemon_start,
@@ -1058,7 +1059,7 @@ async def run_agent_provider_session(
     machine_id: str,
 ) -> None:
     loop = asyncio.get_running_loop()
-    outbound: asyncio.Queue[JsonDict] = asyncio.Queue(maxsize=1000)
+    outbound = EventOutbox(args.server, machine_id)
     runtimes: dict[str, JsonDict] = {}
     provider_runtimes: list[JsonDict] = []
 
@@ -1205,6 +1206,7 @@ async def run_agent_provider_session(
             file=sys.stderr,
         )
         await mux.stop()
+        outbound.close()
         return
 
     logger.info(
@@ -1237,6 +1239,7 @@ async def run_agent_provider_session(
         await message_loop(
             websocket,
             handler=mux.handle_backend_message,
+            outbound=outbound,
             tag_provider_fn=_tag_provider_message,
             provider_tag=None,
         )
@@ -1246,6 +1249,8 @@ async def run_agent_provider_session(
         writer_task.cancel()
         heartbeat_task.cancel()
         await mux.stop()
+        await asyncio.gather(writer_task, heartbeat_task, return_exceptions=True)
+        outbound.close()
 
 
 # ---------------------------------------------------------------------------

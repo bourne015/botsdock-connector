@@ -50,8 +50,17 @@ async def outbound_writer(
     tag_provider_fn: Callable[[JsonDict, str], JsonDict] | None = None,
     provider_tag: str | None = None,
 ) -> None:
+    replay_at = 0.0
+    loop = asyncio.get_running_loop()
     while True:
-        message = await outbound.get()
+        if hasattr(outbound, 'pending') and loop.time() >= replay_at:
+            for pending in outbound.pending():
+                await websocket.send(json.dumps(pending, separators=(",", ":")))
+            replay_at = loop.time() + 15
+        try:
+            message = await asyncio.wait_for(outbound.get(), timeout=1)
+        except asyncio.TimeoutError:
+            continue
         if tag_provider_fn is not None and provider_tag is not None:
             message = tag_provider_fn(message, provider_tag)
         await websocket.send(json.dumps(message, separators=(",", ":")))
@@ -67,6 +76,8 @@ async def message_loop(
 ) -> None:
     async for raw in websocket:
         message = json.loads(raw)
+        if message.get('type') == 'connector.event_ack' and hasattr(outbound, 'acknowledge'):
+            outbound.acknowledge(message)
         if message.get("type") in {"connector.error", "connection.error"}:
             logger.error(
                 "backend error: %s", message.get("error") or message
