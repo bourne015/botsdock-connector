@@ -1062,3 +1062,50 @@ def test_claude_execution_options_reject_unsupported_values():
                                          cwd=Path("."), can_use_tool=callback)
         assert options["permission_mode"] == expected
         assert options["can_use_tool"] is (None if policy == "never" else callback)
+
+
+def test_claude_runtime_missing_cli_is_not_prepared(monkeypatch):
+    from botsdock_connector.cli import _prepare_claude_runtime
+    from botsdock_connector.token_store import ConnectorError
+    import pytest
+
+    monkeypatch.setattr("botsdock_connector.cli.shutil.which", lambda binary: None)
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    with pytest.raises(ConnectorError, match="claude binary not found"):
+        asyncio.run(_prepare_claude_runtime(provider))
+
+
+def test_claude_runtime_requires_sdk_before_advertising(monkeypatch):
+    from botsdock_connector.cli import _prepare_claude_runtime
+    import pytest
+
+    monkeypatch.setattr("botsdock_connector.cli.shutil.which", lambda binary: "/bin/claude")
+
+    async def missing_sdk(self):
+        raise ClaudeAgentSdkRuntimeMissing("SDK missing")
+
+    monkeypatch.setattr(ClaudeAgentSdkProvider, "start", missing_sdk)
+    provider = ClaudeAgentSdkProvider(cwd=".")
+    with pytest.raises(ClaudeAgentSdkRuntimeMissing):
+        asyncio.run(_prepare_claude_runtime(provider))
+
+
+def test_claude_runtime_uses_verified_cli(monkeypatch):
+    from botsdock_connector.cli import _prepare_claude_runtime
+
+    checked = []
+    started = []
+
+    def which(binary):
+        checked.append(binary)
+        return "/custom/claude"
+
+    async def start(self):
+        started.append(self.cli_path)
+
+    monkeypatch.setattr("botsdock_connector.cli.shutil.which", which)
+    monkeypatch.setattr(ClaudeAgentSdkProvider, "start", start)
+    provider = ClaudeAgentSdkProvider(cwd=".", cli_path="/custom/claude")
+    asyncio.run(_prepare_claude_runtime(provider))
+    assert checked == ["/custom/claude"]
+    assert started == ["/custom/claude"]

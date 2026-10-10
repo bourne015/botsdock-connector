@@ -20,7 +20,7 @@ and Git are required). Download and run the standalone installer:
 (
   installer=$(mktemp) || exit 1
   trap 'rm -f "$installer"' EXIT
-  curl -fsSL https://raw.githubusercontent.com/bourne015/botsdock-connector/v0.1.16/botsdock_connector/install.py -o "$installer" && python3 "$installer"
+  curl -fsSL https://raw.githubusercontent.com/bourne015/botsdock-connector/v0.1.17/botsdock_connector/install.py -o "$installer" && python3 "$installer"
 ) && export PATH="$HOME/.botsdock/connector/current/bin:$PATH"
 ```
 
@@ -47,7 +47,7 @@ environment's `botsdock-install.json`. Explicit Git sources force a reinstall so
 same-version commits are picked up. Pin a specific release tag:
 
 ```bash
-botsdock-connector upgrade --version v0.1.16
+botsdock-connector upgrade --version v0.1.17
 ```
 
 After publishing to PyPI, switch the source:

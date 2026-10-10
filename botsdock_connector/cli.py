@@ -1021,6 +1021,15 @@ class AgentConnectorMux:
         return provider.thread_sync_report(limit=limit)
 
 
+async def _prepare_claude_runtime(provider: ClaudeAgentSdkProvider) -> None:
+    claude_bin = provider.cli_path or "claude"
+    resolved_cli = shutil.which(claude_bin)
+    if resolved_cli is None:
+        raise ConnectorError(f"claude binary not found: {claude_bin}")
+    provider.cli_path = resolved_cli
+    await provider.start()
+
+
 async def _send_initial_runtime_sync(websocket: Any, mux: AgentConnectorMux) -> None:
     for provider, runtime in mux.runtimes.items():
         report = await mux._runtime_thread_sync(runtime, limit=200)
@@ -1143,6 +1152,7 @@ async def run_agent_provider_session(
             env_file=getattr(args, "env_file", None),
             approval_timeout_seconds=args.approval_timeout,
         )
+        await _prepare_claude_runtime(claude_provider)
         runtime_profile = claude_provider.runtime_profile_report()
         logger.info(_runtime_profile_log_line(runtime_profile))
         if _should_warn_missing_claude_env(runtime_profile):
