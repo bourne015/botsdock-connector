@@ -113,3 +113,41 @@ def test_sdk_questions_receive_answers_or_rejection(decision):
         options = provider._build_options({}, cwd=Path('/tmp'), can_use_tool=callback)
         assert options.hooks['PreToolUse']
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('decision', ['acceptForSession', 'accept', 'decline'])
+def test_session_tool_approval_is_scoped_to_thread_directory_and_input(decision):
+    import asyncio
+    import claude_agent_sdk.types as sdk_types
+
+    async def run():
+        provider = ClaudeAgentSdkProvider(cwd='/tmp')
+        provider._sdk_types = sdk_types
+        queue = asyncio.Queue()
+        callback = provider._build_permission_handler({'thread_id': 'thread'}, queue, cwd=Path('/tmp'))
+        inputs = {'command': 'npm test'}
+        task = asyncio.create_task(callback('Bash', inputs, {}))
+        event = await queue.get()
+        assert event.payload['available_decisions'] == ['accept', 'acceptForSession', 'decline']
+        assert event.payload['session_approval_scope'] == 'exact_operation'
+        await provider.resolve_approval({'app_server_request_id': event.payload['app_server_request_id'],
+                                         'decision': decision, 'response': {'decision': decision}})
+        await task
+        assert bool(provider._session_tool_approvals) == (decision == 'acceptForSession')
+        if decision == 'acceptForSession':
+            next_turn = provider._build_permission_handler({'thread_id': 'thread', 'turn_id': 'next'}, queue, cwd=Path('/tmp'))
+            assert (await next_turn('Bash', inputs, {})).behavior == 'allow'
+            assert queue.empty()
+        cases = [
+            (callback, {'command': 'npm publish'}),
+            (provider._build_permission_handler({'thread_id': 'other'}, queue, cwd=Path('/tmp')), inputs),
+            (provider._build_permission_handler({'thread_id': 'thread'}, queue, cwd=Path('/other')), inputs),
+        ]
+        if decision != 'acceptForSession':
+            cases.append((callback, inputs))
+        for handler, data in cases:
+            task = asyncio.create_task(handler('Bash', data, {}))
+            event = await queue.get()
+            await provider.resolve_approval({'app_server_request_id': event.payload['app_server_request_id'], 'decision': 'decline'})
+            assert (await task).behavior == 'deny'
+    asyncio.run(run())

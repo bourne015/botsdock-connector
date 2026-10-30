@@ -659,6 +659,7 @@ class ClaudeAgentSdkProvider:
         self._sdk_types: Any | None = None
         self._active_clients: dict[str, Any] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
+        self._session_tool_approvals: set[tuple[str, str, str]] = set()
         self._pending_approvals: dict[str, asyncio.Future[JsonDict]] = {}
         self._pending_questions: dict[str, JsonDict] = {}
         self._auth_required_turns: set[str] = set()
@@ -689,6 +690,7 @@ class ClaudeAgentSdkProvider:
         self._active_clients.clear()
         self._cancel_events.clear()
         self._pending_approvals.clear()
+        self._session_tool_approvals.clear()
         self._auth_required_turns.clear()
         self._sdk = None
         self._sdk_types = None
@@ -1109,7 +1111,7 @@ class ClaudeAgentSdkProvider:
             options = self._build_options(
                 request,
                 cwd=cwd,
-                can_use_tool=self._build_permission_handler(request, queue),
+                can_use_tool=self._build_permission_handler(request, queue, cwd=cwd),
             )
         except ValueError as err:
             self._cancel_events.pop(turn_id, None)
@@ -1343,10 +1345,19 @@ class ClaudeAgentSdkProvider:
         self,
         request: JsonDict,
         queue: asyncio.Queue[ProviderEnvelope | None],
+        *,
+        cwd: Path | None = None,
     ) -> Callable[[str, JsonDict, Any], Any]:
         async def can_use_tool(tool_name: str, input_data: JsonDict, context: Any) -> Any:
             assert self._sdk_types is not None
             if tool_name in _AUTO_ALLOW_TOOLS:
+                return self._sdk_types.PermissionResultAllow()
+
+            thread_id = _string(_payload_value(request, "thread_id"))
+            working_directory = str(cwd or Path(_payload_value(request, "cwd") or self.cwd).resolve())
+            session_key = (thread_id, working_directory, _fingerprint(tool_name, input_data))
+            can_remember = bool(thread_id) and tool_name != "AskUserQuestion"
+            if can_remember and session_key in self._session_tool_approvals:
                 return self._sdk_types.PermissionResultAllow()
 
             provider_request_id = f"claude-perm-{uuid.uuid4().hex}"
@@ -1366,6 +1377,12 @@ class ClaudeAgentSdkProvider:
                 "tool_permission_context": _jsonable(context),
                 "approval_method": _TOOL_APPROVAL_METHOD,
             }
+            payload["available_decisions"] = (
+                ["accept", "acceptForSession", "decline"] if can_remember
+                else ["accept", "decline"]
+            )
+            if can_remember:
+                payload["session_approval_scope"] = "exact_operation"
             command = input_data.get("command") if isinstance(input_data, dict) else None
             if isinstance(command, str) and command:
                 payload["command"] = command
@@ -1401,6 +1418,12 @@ class ClaudeAgentSdkProvider:
                     return self._sdk_types.PermissionResultAllow(updated_input={
                         **input_data, "answers": {q["question"]: answers[q["question"]] for q in input_data.get("questions", [])},
                     })
+                decision = response.get("response", response)
+                if can_remember and (
+                    response.get("decision") == "acceptForSession"
+                    or (isinstance(decision, dict) and decision.get("decision") == "acceptForSession")
+                ):
+                    self._session_tool_approvals.add(session_key)
                 return self._sdk_types.PermissionResultAllow()
             return self._sdk_types.PermissionResultDeny(
                 message=_string(response.get("message")) or "Denied by user",

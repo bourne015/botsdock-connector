@@ -60,3 +60,50 @@ def test_account_snapshot_includes_paginated_runtime_models():
     result = CodexConnector(app_server=Server(), cwd="/tmp")._handle_account_snapshot({})
     assert [model["id"] for model in result["models"]] == ["new-1", "new-2"]
     assert result["models"][1]["supportedReasoningEfforts"][0]["reasoningEffort"] == "high"
+
+
+def test_connector_session_command_approval_matches_exact_scope():
+    class Server(FakeServer):
+        def __init__(self):
+            self.responses = []
+
+        def send_response(self, request_id, response):
+            self.responses.append((request_id, response))
+
+    server = Server()
+    connector = CodexConnector(app_server=server, cwd='/tmp')
+    method = 'item/commandExecution/requestApproval'
+    params = {'threadId': 'thread', 'turnId': 'turn-1', 'itemId': 'item-1',
+              'cwd': '/tmp', 'command': 'npm test', 'availableDecisions': ['accept', 'cancel']}
+    event = connector._normalize_server_request({'id': 1, 'method': method, 'params': params}, method, params)
+    assert event['payload']['available_decisions'] == ['accept', 'acceptForSession', 'cancel']
+    assert event['payload']['session_approval_scope'] == 'exact_operation'
+    connector._handle_approval_respond({'app_server_request_id': 1, 'response': {'decision': 'acceptForSession'}})
+    assert server.responses == [(1, {'decision': 'accept'})]
+    repeated = {**params, 'turnId': 'turn-2', 'itemId': 'item-2'}
+    assert connector._normalize_server_request({'id': 2, 'params': repeated}, method, repeated) is None
+    assert server.responses[-1] == (2, {'decision': 'accept'})
+    for index, change in enumerate([
+        {'threadId': 'other'}, {'cwd': '/other'}, {'command': 'npm publish'},
+        {'additionalPermissions': {'network': True}}, {'availableDecisions': ['cancel']},
+    ], 3):
+        changed = {**repeated, **change}
+        assert connector._normalize_server_request({'id': index, 'params': changed}, method, changed) is not None
+    fresh = CodexConnector(app_server=server, cwd='/tmp')
+    assert fresh._normalize_server_request({'id': 9, 'params': repeated}, method, repeated) is not None
+
+
+def test_native_session_approval_is_forwarded_without_connector_rule():
+    class Server(FakeServer):
+        def send_response(self, request_id, response):
+            self.response = response
+    server = Server()
+    connector = CodexConnector(app_server=server, cwd='/tmp')
+    method = 'item/commandExecution/requestApproval'
+    params = {'threadId': 'thread', 'cwd': '/tmp', 'command': 'npm test',
+              'availableDecisions': ['accept', 'acceptForSession', 'cancel']}
+    event = connector._normalize_server_request({'id': 1, 'method': method, 'params': params}, method, params)
+    assert 'session_approval_scope' not in event['payload']
+    connector._handle_approval_respond({'app_server_request_id': 1, 'response': {'decision': 'acceptForSession'}})
+    assert server.response == {'decision': 'acceptForSession'}
+    assert not connector._session_command_approvals

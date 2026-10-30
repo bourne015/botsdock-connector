@@ -8,6 +8,7 @@ requests to app-server JSON-RPC, and reports normalized events back.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import socket
 import subprocess
@@ -77,6 +78,7 @@ class CodexConnector:
         self.reverse_thread_map: dict[str, str] = {}
         self.turn_map: dict[str, str] = {}
         self.reverse_turn_map: dict[str, str] = {}
+        self._session_command_approvals: set[str] = set()
         self.pending_approval_requests: dict[str, JsonDict] = {}
         self.pending_approval_events: dict[str, JsonDict] = {}
         self.pending_unmapped_server_requests: dict[str, JsonDict] = {}
@@ -420,7 +422,21 @@ class CodexConnector:
             if pending.get("id") is not None
             else app_request_id
         )
+        params = pending.get("params") or {}
+        session_key = self._session_command_key(pending.get("method"), params)
+        choices = params.get("availableDecisions", params.get("available_decisions"))
+        remember = (
+            session_key is not None
+            and response.get("decision") == "acceptForSession"
+            and isinstance(choices, list)
+            and "accept" in choices
+            and "acceptForSession" not in choices
+        )
+        if remember:
+            response = {**response, "decision": "accept"}
         self.app_server.send_response(response_request_id, response)
+        if remember:
+            self._session_command_approvals.add(session_key)
         self.pending_approval_events.pop(str(app_request_id), None)
         self.pending_unmapped_server_requests.pop(str(app_request_id), None)
         return {"app_server_request_id": app_request_id, "decision": decision, "response": response}
@@ -684,6 +700,12 @@ class CodexConnector:
             if request_id is not None:
                 self.app_server.send_response(request_id, error={"code": "unsupported_request", "message": f"unsupported app-server request: {method}"})
             return None
+        session_key = self._session_command_key(method, params)
+        choices = params.get("availableDecisions", params.get("available_decisions"))
+        if (request_id is not None and session_key in self._session_command_approvals
+                and isinstance(choices, list) and "accept" in choices):
+            self.app_server.send_response(request_id, {"decision": "accept"})
+            return None
         if request_id is not None:
             self.pending_approval_requests[str(request_id)] = message
         event = self._approval_event_from_request(
@@ -696,6 +718,19 @@ class CodexConnector:
         if request_id is not None:
             self.pending_approval_events[str(request_id)] = event
         return event
+
+    def _session_command_key(self, method: str | None, params: JsonDict) -> str | None:
+        if (method != "item/commandExecution/requestApproval"
+                or not params.get("threadId") or not params.get("cwd")
+                or not params.get("command")):
+            return None
+        # Include every execution/permission field, excluding only request identity
+        # and presentation fields that change between identical invocations.
+        scope = {key: value for key, value in params.items() if key not in {
+            "turnId", "itemId", "approvalId", "reason", "availableDecisions",
+            "available_decisions",
+        }}
+        return json.dumps(scope, sort_keys=True, separators=(",", ":"))
 
     def _approval_event_from_request(
         self,
@@ -725,6 +760,14 @@ class CodexConnector:
                 "available_decisions",
             ),
         }
+        choices = payload["available_decisions"]
+        if (self._session_command_key(method, params) is not None
+                and isinstance(choices, list) and "accept" in choices
+                and "acceptForSession" not in choices):
+            choices = list(choices)
+            choices.insert(choices.index("accept") + 1, "acceptForSession")
+            payload["available_decisions"] = choices
+            payload["session_approval_scope"] = "exact_operation"
         for target_key, source_keys in {
             "item_id": ("itemId", "item_id"),
             "reason": ("reason",),
